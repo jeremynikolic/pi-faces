@@ -24,6 +24,8 @@
  */
 
 import type { ExtensionAPI } from "@anthropic/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import os from "node:os";
 
 const PROFILES_DIR =
   (typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||

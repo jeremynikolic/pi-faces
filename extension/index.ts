@@ -23,7 +23,7 @@
  *   ~/.pi/profiles/coder.json
  */
 
-import type { ExtensionAPI } from "@anthropic/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
@@ -80,8 +80,7 @@ function resolveSystemPrompt(
 
 export default function (pi: ExtensionAPI) {
   // Register the --profile CLI flag
-  pi.registerFlag({
-    name: "profile",
+  pi.registerFlag("profile", {
     type: "string",
     description: "Agent profile name (loads ~/.pi/profiles/<name>.json)",
   });

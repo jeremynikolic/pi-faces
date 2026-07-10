@@ -1,6 +1,6 @@
 # pi-agent-profiles
 
-Agent profiles for `pi` — bundle model, provider, thinking level, tools, and system prompt into a named JSON file, selected via `--profile <name>`.
+Agent profiles for `pi` — bundle a short description, model, provider, thinking level, tools, and system prompt into a named JSON file, selected via `--profile <name>`. Managed with the `/profiles` slash command.
 
 ## Install
 
@@ -24,6 +24,8 @@ pi --profile reviewer -p "review this diff"
 
 Additional flags pass through to `pi` as normal.
 
+Inside a pi session, use `/profiles` to manage profiles (see below).
+
 ## Profile Directory
 
 Profiles live in `~/.pi/agent-profiles/<name>.json`:
@@ -37,10 +39,11 @@ Override the directory with the `PI_PROFILES_DIR` environment variable (default:
 
 ## Profile Format
 
-Each profile is a JSON file. All fields are optional — omit a field and `pi` keeps its default.
+Each profile is a JSON file. All fields are optional — omit a field and `pi` keeps its default. `description` is metadata shown by `/profiles list`; it is not applied to the agent.
 
 ```json
 {
+  "description": "Plans work before implementation: scopes tasks, identifies risks, and writes a plan.",
   "provider": "anthropic",
   "model": "claude-sonnet-4",
   "thinking": "high",
@@ -51,6 +54,7 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 
 | Field | Effect | Optional |
 |---|---|---|
+| `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
 | `provider` | Provider ID (anthropic, openai, etc.) | Yes |
 | `model` | Model ID | Yes (requires provider) |
 | `thinking` | off / minimal / low / medium / high / xhigh | Yes |
@@ -61,13 +65,18 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 
 ## Managing Profiles
 
+Use the `/profiles` command inside a pi session:
+
 | Action | Command |
 |---|---|
-| List | `ls ~/.pi/agent-profiles/*.json` |
-| Create | Write `~/.pi/agent-profiles/<name>.json` |
-| Edit | Edit `~/.pi/agent-profiles/<name>.json` |
-| Delete | `rm ~/.pi/agent-profiles/<name>.json` |
-| Rename | `mv ~/.pi/agent-profiles/<old>.json ~/.pi/agent-profiles/<new>.json` |
+| List profiles (name + description) | `/profiles` or `/profiles list` |
+| Show a profile's full JSON | `/profiles show <name>` |
+| Create a profile (scaffold + edit) | `/profiles new <name>` |
+| Edit a profile in the editor | `/profiles edit <name>` |
+| Delete a profile (with confirm) | `/profiles delete <name>` |
+| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
+
+`/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles. `new`, `edit`, and `delete` use interactive dialogs and require an interactive session. Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
 
 ## Example Profiles
 
@@ -79,7 +88,7 @@ cp profiles/*.json ~/.pi/agent-profiles/
 
 ## How It Works
 
-The extension registers a `--profile` CLI flag and applies the matching JSON before each agent run via `before_agent_start`. Settings are applied through pi's extension hostcalls: `setModel()`, `setThinkingLevel()`, `setActiveTools()`, and a `{ systemPrompt }` return. Pi's own config precedence still applies for anything the profile doesn't set.
+The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON before each agent run via `before_agent_start`. Settings are applied through pi's extension hostcalls: `setModel()`, `setThinkingLevel()`, `setActiveTools()`, and a `{ systemPrompt }` return. Pi's own config precedence still applies for anything the profile doesn't set.
 
 See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls and the inline-vs-file system prompt behavior.
 

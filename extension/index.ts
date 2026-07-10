@@ -1,7 +1,7 @@
 /**
  * pi-agent-profiles: Select a full agent profile via --profile <name>
  *
- * Registers a --profile CLI flag. When set, reads ~/.pi/profiles/<name>.json
+ * Registers a --profile CLI flag. When set, reads ~/.pi/agent-profiles/<name>.json
  * and applies: provider, model, thinking level, tools, and system prompt.
  *
  * The profile JSON supports all fields optionally. Omit a field and pi keeps
@@ -19,8 +19,8 @@
  *   pi --profile coder -p "implement the auth module"
  *
  * Profile files:
- *   ~/.pi/profiles/planner.json
- *   ~/.pi/profiles/coder.json
+ *   ~/.pi/agent-profiles/planner.json
+ *   ~/.pi/agent-profiles/coder.json
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -29,7 +29,7 @@ import os from "node:os";
 
 const PROFILES_DIR =
   (typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||
-  "~/.pi/profiles";
+  "~/.pi/agent-profiles";
 
 function expandTilde(p: string): string {
   if (p.startsWith("~/")) {
@@ -82,7 +82,7 @@ export default function (pi: ExtensionAPI) {
   // Register the --profile CLI flag
   pi.registerFlag("profile", {
     type: "string",
-    description: "Agent profile name (loads ~/.pi/profiles/<name>.json)",
+    description: "Agent profile name (loads ~/.pi/agent-profiles/<name>.json)",
   });
 
   // Apply the profile before the agent starts

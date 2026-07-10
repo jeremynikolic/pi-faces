@@ -10,13 +10,13 @@ A profile system for `pi` that bundles model, provider, thinking level, tools, a
 ## Architecture
 
 ```
-~/.pi/profiles/
+~/.pi/agent-profiles/
 ├── planner.json          # provider, model, thinking, tools, system_prompt
 ├── coder.json
 └── reviewer.json
 ```
 
-The extension registers a `--profile` flag. When you pass `--profile planner`, it reads `~/.pi/profiles/planner.json` and applies:
+The extension registers a `--profile` flag. When you pass `--profile planner`, it reads `~/.pi/agent-profiles/planner.json` and applies:
 - `provider` + `model` via `setModel()`
 - `thinking` via `setThinkingLevel()`
 - `tools` via `setActiveTools()`
@@ -41,7 +41,7 @@ pi install ./pi-agent-profiles
 ### 2. Create the profiles directory
 
 ```bash
-mkdir -p ~/.pi/profiles
+mkdir -p ~/.pi/agent-profiles
 ```
 
 ### 3. Create profiles
@@ -91,8 +91,8 @@ File paths are resolved relative to the profile JSON's directory. Absolute paths
 ## Creating a New Profile
 
 ```bash
-mkdir -p ~/.pi/profiles
-cat > ~/.pi/profiles/<name>.json << 'EOF'
+mkdir -p ~/.pi/agent-profiles
+cat > ~/.pi/agent-profiles/<name>.json << 'EOF'
 {
   "provider": "anthropic",
   "model": "claude-sonnet-4",
@@ -106,8 +106,8 @@ EOF
 Or with a separate system prompt file:
 
 ```bash
-mkdir -p ~/.pi/profiles/<name>
-cat > ~/.pi/profiles/<name>.json << 'EOF'
+mkdir -p ~/.pi/agent-profiles/<name>
+cat > ~/.pi/agent-profiles/<name>.json << 'EOF'
 {
   "provider": "anthropic",
   "model": "claude-sonnet-4",
@@ -121,11 +121,11 @@ EOF
 
 | Action | Command |
 |---|---|
-| List profiles | `ls ~/.pi/profiles/*.json` |
-| Create profile | Write `~/.pi/profiles/<name>.json` |
-| Edit profile | Edit `~/.pi/profiles/<name>.json` |
-| Delete profile | `rm ~/.pi/profiles/<name>.json` |
-| Rename profile | `mv ~/.pi/profiles/<old>.json ~/.pi/profiles/<new>.json` |
+| List profiles | `ls ~/.pi/agent-profiles/*.json` |
+| Create profile | Write `~/.pi/agent-profiles/<name>.json` |
+| Edit profile | Edit `~/.pi/agent-profiles/<name>.json` |
+| Delete profile | `rm ~/.pi/agent-profiles/<name>.json` |
+| Rename profile | `mv ~/.pi/agent-profiles/<old>.json ~/.pi/agent-profiles/<new>.json` |
 
 ## Usage
 
@@ -158,4 +158,4 @@ Pi's own config precedence still applies for anything the profile doesn't set (A
 - **All fields optional**: If a field is missing from the JSON, pi keeps its default for that setting.
 - **system_prompt replaces default**: The system prompt from the profile replaces pi's built-in system prompt entirely.
 - **File path resolution**: Relative paths in `system_prompt` resolve relative to the profile JSON's directory. If the string is not a readable file, it is treated as inline text.
-- **Env var override**: Set `PI_PROFILES_DIR` to use a different profiles directory (default: `~/.pi/profiles`).
+- **Env var override**: Set `PI_PROFILES_DIR` to use a different profiles directory (default: `~/.pi/agent-profiles`).

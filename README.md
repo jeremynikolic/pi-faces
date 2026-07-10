@@ -26,14 +26,14 @@ Additional flags pass through to `pi` as normal.
 
 ## Profile Directory
 
-Profiles live in `~/.pi/profiles/<name>.json`:
+Profiles live in `~/.pi/agent-profiles/<name>.json`:
 
 ```bash
-mkdir -p ~/.pi/profiles
-ls ~/.pi/profiles/*.json
+mkdir -p ~/.pi/agent-profiles
+ls ~/.pi/agent-profiles/*.json
 ```
 
-Override the directory with the `PI_PROFILES_DIR` environment variable (default: `~/.pi/profiles`).
+Override the directory with the `PI_PROFILES_DIR` environment variable (default: `~/.pi/agent-profiles`).
 
 ## Profile Format
 
@@ -63,18 +63,18 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 
 | Action | Command |
 |---|---|
-| List | `ls ~/.pi/profiles/*.json` |
-| Create | Write `~/.pi/profiles/<name>.json` |
-| Edit | Edit `~/.pi/profiles/<name>.json` |
-| Delete | `rm ~/.pi/profiles/<name>.json` |
-| Rename | `mv ~/.pi/profiles/<old>.json ~/.pi/profiles/<new>.json` |
+| List | `ls ~/.pi/agent-profiles/*.json` |
+| Create | Write `~/.pi/agent-profiles/<name>.json` |
+| Edit | Edit `~/.pi/agent-profiles/<name>.json` |
+| Delete | `rm ~/.pi/agent-profiles/<name>.json` |
+| Rename | `mv ~/.pi/agent-profiles/<old>.json ~/.pi/agent-profiles/<new>.json` |
 
 ## Example Profiles
 
-See `profiles/` for ready-made planner, coder, and reviewer profiles. Copy them to `~/.pi/profiles/` to use:
+See `profiles/` for ready-made planner, coder, and reviewer profiles. Copy them to `~/.pi/agent-profiles/` to use:
 
 ```bash
-cp profiles/*.json ~/.pi/profiles/
+cp profiles/*.json ~/.pi/agent-profiles/
 ```
 
 ## How It Works

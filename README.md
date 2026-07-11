@@ -67,7 +67,12 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 | `system_prompt` | Inline text or path to a file | Yes |
 | `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt. `true`: replace it entirely. | Yes |
 
-`system_prompt` accepts either an inline string or a file path. File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work. If the string is not a readable file path, it is treated as inline text. Unknown fields are reported as a warning (catches typos).
+`system_prompt` accepts either an inline string or a file path:
+
+- File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work.
+- If the string is not a readable file path, it is treated as inline text.
+
+Unknown fields are reported as a warning (catches typos).
 
 ## Managing Profiles
 
@@ -82,7 +87,13 @@ Use the `/profiles` command inside a pi session:
 | Delete a profile (with confirm) | `/profiles delete <name>` |
 | Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
 
-`/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles. `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts); `edit` and `delete` use interactive dialogs and require an interactive session. `rename` requires an interactive session only when the target already exists (to confirm overwrite). Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
+Behavior notes:
+
+- `/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles.
+- `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts).
+- `edit` and `delete` use interactive dialogs and require an interactive session.
+- `rename` requires an interactive session only when the target already exists (to confirm overwrite).
+- Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
 
 ## Example Profiles
 
@@ -94,7 +105,11 @@ cp profiles/*.json ~/.pi/agent-profiles/
 
 ## How It Works
 
-The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`. **Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely. Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
+The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`.
+
+**Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely.
+
+Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
 
 ## Session Name Prefix
 
@@ -116,7 +131,10 @@ echo '{"prefix_session_name": false}' > ~/.pi/agent-profiles/config/config.json
 |---|---|---|---|
 | `prefix_session_name` | boolean | `true` | Prefix the session display name with `[profile]` while a profile is active |
 
-The config file is optional — when missing, defaults apply (prefix on). Override the config path with the `PI_PROFILES_CONFIG` environment variable (useful for per-launch overrides without editing the file). Unknown fields are warned; `null` is treated as absent. The prefix is only added when a profile is active (`--profile` is set) and the name does not already carry the tag, so resuming a previously-prefixed session is not double-prefixed.
+- The config file is optional — when missing, defaults apply (prefix on).
+- Override the config path with the `PI_PROFILES_CONFIG` environment variable (useful for per-launch overrides without editing the file).
+- Unknown fields are warned; `null` is treated as absent.
+- The prefix is only added when a profile is active (`--profile` is set) and the name does not already carry the tag, so resuming a previously-prefixed session is not double-prefixed.
 
 ## License
 

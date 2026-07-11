@@ -14,6 +14,7 @@ Agent profiles for `pi` — bundle a short description, model, provider, thinkin
 - **Per-session application**: Model, thinking, and tools applied once per session; system prompt applied every turn.
 - **Prompt modes**: Append to or replace pi's built-in system prompt (`replace_system_prompt`).
 - **Session name prefix**: Active profile tags the session name so sessions group in `/resume` and `pi -r`.
+- **Seeded defaults**: `planner`, `coder`, and `reviewer` are written into `~/.pi/agent-profiles/` automatically on first run.
 - **Graceful defaults**: Omit any field and `pi` keeps its default; unknown fields and tool names are warned.
 
 ## Install
@@ -105,13 +106,15 @@ Behavior notes:
 - `rename` requires an interactive session only when the target already exists (to confirm overwrite).
 - Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
 
-## Example Profiles
+## Default Profiles
 
-See `profiles/` for ready-made planner, coder, and reviewer profiles. Copy them to `~/.pi/agent-profiles/` to use:
+Three ready-made profiles — `planner`, `coder`, and `reviewer` — are seeded into `~/.pi/agent-profiles/` automatically on first run (after `pi install`). Seeding is idempotent: it runs only once per directory (tracked by a `.defaults-seeded` marker) and never overwrites an existing file, so your edits and deletions stick. If you override `PI_PROFILES_DIR`, seeding is skipped — you own that directory.
 
-```bash
-cp profiles/*.json ~/.pi/agent-profiles/
-```
+| Profile | Model | Purpose |
+|---|---|---|
+| `planner` | `glm-5.2` | Scope a goal, identify risks, write an actionable plan |
+| `coder` | `kimi-k2.7-code` | Take one bounded task, implement, run tests, report |
+| `reviewer` | `glm-5.2` | Check implementation vs plan, coverage, edge cases, simplicity |
 
 ## How It Works
 

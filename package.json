@@ -10,9 +10,9 @@
   "license": "MIT",
   "pi": {
     "extensions": [
-      "./extension/index.ts"
+      "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/jeremynikolic/pi-agent-profiles/main/docs/preview.png"
+    "image": "https://raw.githubusercontent.com/jeremynikolic/pi-agent-profiles/main/art/preview.png"
   },
   "scripts": {
     "test": "vitest run",

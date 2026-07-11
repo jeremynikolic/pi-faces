@@ -19,7 +19,7 @@ import factory, {
 	withProfilePrefix,
 	type Profile,
 	type PackageConfig,
-} from "./index.ts";
+} from "../src/index.ts";
 
 // Mock node:fs only for renameSync so we can force the sibling-directory move to
 // fail (after the profile file was renamed) and exercise the rollback branch.

@@ -292,27 +292,6 @@ const SUBCOMMAND_ALIASES: Record<string, string[]> = {
 	rename: ["mv"],
 };
 
-function firstArg(args: string): string | undefined {
-	const p = args.trim().split(/\s+/).filter(Boolean);
-	return p[0];
-}
-
-function completeName(argPrefix: string) {
-	const typed = argPrefix.trim();
-	return listProfiles()
-		.filter((p) => p.name.startsWith(typed))
-		.map((p) => ({ value: p.name, label: p.name, description: p.description }));
-}
-
-function completeRenameSource(argPrefix: string) {
-	// A space means the source is complete and the user is typing the target —
-	// never complete the target with existing names (invites overwrite).
-	if (argPrefix.includes(" ")) return null;
-	return listProfiles()
-		.filter((p) => p.name.startsWith(argPrefix))
-		.map((p) => ({ value: p.name, label: p.name, description: p.description }));
-}
-
 export default function (pi: ExtensionAPI) {
 	// Register the --profile CLI flag
 	pi.registerFlag("profile", {
@@ -458,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 				const typed = parts[1];
 				return listProfiles()
 					.filter((p) => p.name.startsWith(typed))
-					.map((p) => ({ value: p.name, label: p.name, description: p.description }));
+					.map((p) => ({ value: sub + " " + p.name, label: p.name, description: p.description }));
 			}
 
 			// show/edit/delete + aliases take a single name arg.
@@ -466,7 +445,7 @@ export default function (pi: ExtensionAPI) {
 			const typed = parts[1];
 			return listProfiles()
 				.filter((p) => p.name.startsWith(typed))
-				.map((p) => ({ value: p.name, label: p.name, description: p.description }));
+				.map((p) => ({ value: sub + " " + p.name, label: p.name, description: p.description }));
 		},
 		async handler(args, ctx) {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -505,53 +484,6 @@ export default function (pi: ExtensionAPI) {
 					);
 				}
 			}
-		},
-	});
-
-	// Namespaced subcommands — each shows up as its own entry in the
-	// slash-command picker. /profiles <sub> <args> still works via the
-	// umbrella command above.
-	pi.registerCommand("profiles:list", {
-		description: "List agent profiles (name + description).",
-		getArgumentCompletions: () => null,
-		async handler(_args, ctx) {
-			return cmdList(ctx);
-		},
-	});
-	pi.registerCommand("profiles:show", {
-		description: "Show a profile's full JSON. Usage: /profiles:show <name>",
-		getArgumentCompletions: (argPrefix) => completeName(argPrefix),
-		async handler(args, ctx) {
-			return cmdShow(firstArg(args), ctx);
-		},
-	});
-	pi.registerCommand("profiles:new", {
-		description: "Create a profile (scaffold + optional edit). Usage: /profiles:new <name>",
-		getArgumentCompletions: () => null,
-		async handler(args, ctx) {
-			return cmdNew(firstArg(args), ctx);
-		},
-	});
-	pi.registerCommand("profiles:edit", {
-		description: "Edit a profile in the editor. Usage: /profiles:edit <name>",
-		getArgumentCompletions: (argPrefix) => completeName(argPrefix),
-		async handler(args, ctx) {
-			return cmdEdit(firstArg(args), ctx);
-		},
-	});
-	pi.registerCommand("profiles:delete", {
-		description: "Delete a profile (with confirm). Usage: /profiles:delete <name>",
-		getArgumentCompletions: (argPrefix) => completeName(argPrefix),
-		async handler(args, ctx) {
-			return cmdDelete(firstArg(args), ctx);
-		},
-	});
-	pi.registerCommand("profiles:rename", {
-		description: "Rename a profile (and its prompt dir). Usage: /profiles:rename <old> <new>",
-		getArgumentCompletions: (argPrefix) => completeRenameSource(argPrefix),
-		async handler(args, ctx) {
-			const p = args.trim().split(/\s+/).filter(Boolean);
-			return cmdRename(p[0], p[1], ctx);
 		},
 	});
 

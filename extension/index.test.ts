@@ -547,8 +547,9 @@ describe("/profiles command", () => {
 		writeProfile("planner", { description: "d" });
 		writeProfile("coder", {});
 		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("show p") as { value: string }[];
-		expect(r.map((c) => c.value)).toEqual(["planner"]);
+		const r = command("profiles")!.getArgumentCompletions("show p") as { value: string; label: string }[];
+		expect(r.map((c) => c.value)).toEqual(["show planner"]);
+		expect(r.map((c) => c.label)).toEqual(["planner"]);
 	});
 
 	it("getArgumentCompletions returns null for rename target (second arg)", async () => {
@@ -560,8 +561,9 @@ describe("/profiles command", () => {
 	it("getArgumentCompletions completes source for rename", async () => {
 		writeProfile("planner", { description: "d" });
 		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("rename p") as { value: string }[];
-		expect(r.map((c) => c.value)).toEqual(["planner"]);
+		const r = command("profiles")!.getArgumentCompletions("rename p") as { value: string; label: string }[];
+		expect(r.map((c) => c.value)).toEqual(["rename planner"]);
+		expect(r.map((c) => c.label)).toEqual(["planner"]);
 	});
 
 	it("getArgumentCompletions returns null for unknown sub", async () => {
@@ -570,47 +572,19 @@ describe("/profiles command", () => {
 	});
 });
 
-describe("namespaced subcommands (/profiles:show etc.)", () => {
-	it("registers all six namespaced commands", () => {
+describe("argument completion keeps the subcommand (regression)", () => {
+	it("delete completion value includes the subcommand", async () => {
+		writeProfile("brainy", { description: "d" });
 		const { command } = setupCommand();
-		for (const name of ["profiles:list", "profiles:show", "profiles:new", "profiles:edit", "profiles:delete", "profiles:rename"]) {
-			expect(command(name)).toBeDefined();
-		}
+		const r = command("profiles")!.getArgumentCompletions("delete b") as { value: string; label: string }[];
+		expect(r.map((c) => c.value)).toEqual(["delete brainy"]);
+		expect(r.map((c) => c.label)).toEqual(["brainy"]);
 	});
 
-	it("profiles:show <name> prints the profile JSON", async () => {
-		writeProfile("demo", { description: "d" });
-		const { calls, command } = setupCommand();
-		await command("profiles:show")!.handler("demo", makeCtx());
-		expect(calls.sendMessage[0].content).toContain('{"description":"d"}');
-	});
-
-	it("profiles:new <name> writes a scaffold", async () => {
+	it("rm alias completion value keeps the alias", async () => {
+		writeProfile("brainy", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles:new")!.handler("demo", makeCtx());
-		expect(existsSync(join(dir, "demo.json"))).toBe(true);
-	});
-
-	it("profiles:rename <old> <new> moves the file", async () => {
-		writeProfile("a", { description: "d" });
-		const { command } = setupCommand();
-		await command("profiles:rename")!.handler("a b", makeCtx());
-		expect(existsSync(join(dir, "b.json"))).toBe(true);
-		expect(existsSync(join(dir, "a.json"))).toBe(false);
-	});
-
-	it("profiles:show completes profile names", async () => {
-		writeProfile("planner", { description: "d" });
-		const { command } = setupCommand();
-		const r = command("profiles:show")!.getArgumentCompletions("p") as { value: string }[];
-		expect(r.map((c) => c.value)).toEqual(["planner"]);
-	});
-
-	it("profiles:rename completes only the source", async () => {
-		writeProfile("planner", { description: "d" });
-		const { command } = setupCommand();
-		expect(command("profiles:rename")!.getArgumentCompletions("planner ")).toBe(null);
-		const r = command("profiles:rename")!.getArgumentCompletions("p") as { value: string }[];
-		expect(r.map((c) => c.value)).toEqual(["planner"]);
+		const r = command("profiles")!.getArgumentCompletions("rm b") as { value: string }[];
+		expect(r.map((c) => c.value)).toEqual(["rm brainy"]);
 	});
 });

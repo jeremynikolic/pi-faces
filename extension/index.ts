@@ -108,8 +108,7 @@ export function isValidProfileName(name: string | undefined): name is string {
 	return (
 		typeof name === "string" &&
 		name.length > 0 &&
-		!name.includes("/") &&
-		!name.includes("\\") &&
+		!/[/\\\s]/.test(name) &&
 		name !== "." &&
 		name !== ".."
 	);
@@ -383,7 +382,13 @@ export default function (pi: ExtensionAPI) {
 							"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
 						);
 					}
-					pi.setActiveTools([...new Set(knownTools)]);
+					// Guard against disabling every tool: if the profile listed only
+					// unknown tools, leave the active tool set unchanged.
+					if (knownTools.length === 0) {
+						console.warn("[pi-agent-profiles] No known tools in profile; tool set unchanged");
+					} else {
+						pi.setActiveTools([...new Set(knownTools)]);
+					}
 				} catch (err) {
 					console.warn("[pi-agent-profiles] Failed to set tools: " + err);
 				}
@@ -409,7 +414,7 @@ export default function (pi: ExtensionAPI) {
 		getArgumentCompletions(argPrefix) {
 			const parts = argPrefix.split(/\s+/);
 
-			// No subcommand typed yet → complete subcommand names (and aliases).
+			// No subcommand typed yet → complete subcommand names.
 			if (parts.length < 2) {
 				const prefix = parts[0] ?? "";
 				const all = [...SUBCOMMANDS];
@@ -423,9 +428,9 @@ export default function (pi: ExtensionAPI) {
 
 			if (!canonical) return null;
 
-			// rename/mv: complete only the source (first name arg), never the
+			// rename: complete only the source (first name arg), never the
 			// target — completing the target with existing names invites overwrite.
-			if (sub === "rename" || sub === "mv") {
+			if (sub === "rename") {
 				if (parts.length !== 2) return null;
 				const typed = parts[1];
 				return listProfiles()
@@ -433,7 +438,7 @@ export default function (pi: ExtensionAPI) {
 					.map((p) => ({ value: sub + " " + p.name, label: p.name, description: p.description }));
 			}
 
-			// show/edit/delete + aliases take a single name arg.
+			// show/edit/delete take a single name arg.
 			if (parts.length !== 2) return null;
 			const typed = parts[1];
 			return listProfiles()

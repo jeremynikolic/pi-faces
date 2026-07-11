@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,24 @@ import factory, {
 	parseProfileFile,
 	type Profile,
 } from "./index.ts";
+
+// Mock node:fs only for renameSync so we can force the sibling-directory move to
+// fail (after the profile file was renamed) and exercise the rollback branch.
+// Everything else delegates to the real fs, so the rest of the suite is
+// unaffected. The flag is reset to null by default.
+const __piapMock = vi.hoisted(() => ({ throwOnRenamePath: null as string | null }));
+vi.mock("node:fs", async (importActual) => {
+	const actual = await importActual<typeof import("node:fs")>();
+	return {
+		...actual,
+		renameSync: (from: string, to: string) => {
+			if (__piapMock.throwOnRenamePath !== null && to === __piapMock.throwOnRenamePath) {
+				throw new Error("forced dir-rename failure");
+			}
+			return actual.renameSync(from, to);
+		},
+	};
+});
 
 // --- typed stubs (no `any`) --------------------------------------------------
 
@@ -134,6 +152,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	delete process.env.PI_PROFILES_DIR;
+	__piapMock.throwOnRenamePath = null;
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -472,15 +491,29 @@ describe("/profiles command", () => {
 		expect(existsSync(join(dir, "old"))).toBe(false);
 	});
 
-	it("rename rolls back the profile when the sibling move fails and target did not exist", async () => {
+	it("rename aborts (preflight) when the target path is occupied by a file", async () => {
 		writeProfile("old", { description: "d" });
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
-		writeFileSync(join(dir, "new"), "blocker"); // makes toDir a file → dir rename fails
+		writeFileSync(join(dir, "new"), "blocker"); // a file at the toDir path → preflight aborts
 		const { command } = setupCommand();
 		await command("profiles")!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "old.json"))).toBe(true);
 		expect(existsSync(join(dir, "new.json"))).toBe(false);
+	});
+
+	it("rename rolls back the profile when the sibling-dir move fails and target did not exist", async () => {
+		writeProfile("old", { description: "d" });
+		mkdirSync(join(dir, "old"));
+		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
+		// toDir (dir/new) must be absent so preflight passes; then force the dir
+		// rename to fail so the profile rename is rolled back.
+		__piapMock.throwOnRenamePath = join(dir, "new");
+		const { command } = setupCommand();
+		await command("profiles")!.handler("rename old new", makeCtx());
+		expect(existsSync(join(dir, "old.json"))).toBe(true);
+		expect(existsSync(join(dir, "new.json"))).toBe(false);
+		expect(existsSync(join(dir, "old", "system-prompt.md"))).toBe(true);
 	});
 
 	it("rename aborts when both source and target prompt dirs exist", async () => {
@@ -547,4 +580,46 @@ describe("argument completion keeps the subcommand (regression)", () => {
 		expect(r.map((c) => c.label)).toEqual(["brainy"]);
 	});
 
+});
+
+describe("second-pass review coverage", () => {
+	it("isValidProfileName rejects whitespace in names", () => {
+		expect(isValidProfileName("my profile")).toBe(false);
+		expect(isValidProfileName("a\tb")).toBe(false);
+		expect(isValidProfileName("a\nb")).toBe(false);
+		expect(isValidProfileName("ok")).toBe(true);
+	});
+
+	it("list silently skips malformed profile files", async () => {
+		writeFileSync(join(dir, "bad.json"), "{not json");
+		writeProfile("alpha", { description: "a" });
+		const { calls, command } = setupCommand();
+		await command("profiles")!.handler("list", makeCtx());
+		expect(calls.sendMessage).toHaveLength(1);
+		const body = calls.sendMessage[0].content;
+		expect(body).toContain("alpha — a");
+		expect(body).not.toContain("bad");
+	});
+
+	it("all-unknown tools leaves the tool set unchanged (no setActiveTools call)", async () => {
+		writeProfile("p", { tools: ["nope", "alsogone"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+	it("setModel returning false (no API key) warns and still applies the rest", async () => {
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"], system_prompt: "sp" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		(pi as unknown as { setModel: () => Promise<boolean> }).setModel = async () => false;
+		factory(pi);
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" }))) as BeforeAgentStartEventResult;
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(r.systemPrompt).toContain("sp");
+	});
 });

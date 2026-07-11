@@ -97,7 +97,7 @@ export class ProfileApplier {
 			// Tools. Filter to known tools (ghost entries silently no-op in pi
 			// but mask misconfigurations), dedup, and warn on unknown names.
 			const tools = profile.tools;
-			if (tools) {
+			if (tools && tools.length > 0) {
 				try {
 					const known = new Set(this.pi.getAllTools().map((t) => t.name));
 					const knownTools = tools.filter((t) => known.has(t));

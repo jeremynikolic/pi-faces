@@ -642,6 +642,15 @@ describe("second-pass review coverage", () => {
 		await handlers.get("before_agent_start")![0](event(), makeCtx());
 		expect(calls.setActiveTools).toHaveLength(0);
 	});
+	it("empty tools array leaves all tools active (no setActiveTools call)", async () => {
+		writeProfile("p", { tools: [] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
 	it("setModel returning false (no API key) warns and still applies the rest", async () => {
 		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"], system_prompt: "sp" });
 		const calls = makeCalls();

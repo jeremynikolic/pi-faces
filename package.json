@@ -2,12 +2,16 @@
   "name": "pi-agent-profiles",
   "version": "0.1.0",
   "description": "Agent profiles for pi: bundle description, model, provider, thinking, tools, and system prompt into a named unit selected via --profile",
-  "keywords": ["pi-package", "pi-extension"],
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
   "type": "module",
   "license": "MIT",
   "pi": {
-    "extensions": ["./extension/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extension/index.ts"
+    ]
   },
   "scripts": {
     "test": "vitest run",

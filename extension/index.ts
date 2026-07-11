@@ -23,6 +23,12 @@
  *                             tool guidance and project context). Set true to
  *                             replace the built-in prompt entirely.
  *
+ * Session-name prefix:
+ *   While a profile is active, the session display name is auto-prefixed with
+ *   "[profile]" so it groups in /resume and `pi -r`. Enabled by default;
+ *   disable via <profiles-dir>/config/config.json with { "prefix_session_name": false }
+ *   (override the config path with PI_PROFILES_CONFIG).
+ *
  * Install:
  *   pi install npm:pi-agent-profiles
  *
@@ -51,6 +57,17 @@ import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_PROFILES_DIR = "~/.pi/agent-profiles";
+
+// Session-name prefix feature.
+//
+// When a profile is active, the extension can prefix the session display name
+// with "[<profile-name>]" so sessions are easy to find in /resume and pi -r.
+// Controlled by a JSON config file at <profiles-dir>/config/config.json
+// (override the path with PI_PROFILES_CONFIG). The file is optional; when
+// missing, defaults apply (prefix on). Set { "prefix_session_name": false }
+// to disable. Lives in a subdir so listProfiles() (which scans top-level
+// *.json) never mistakes it for a profile.
+const KNOWN_CONFIG_FIELDS = new Set(["prefix_session_name"]);
 
 const THINKING_LEVELS = new Set([
 	"off",
@@ -86,6 +103,76 @@ export type ParseProfileResult =
 	| { ok: true; profile: Profile; warnings: string[] }
 	| { ok: false; error: string };
 
+// --- package config (JSON file) --------------------------------------------
+
+export interface PackageConfig {
+	/** Prefix the session display name with "[profile]" while a profile is active. Default: true. */
+	prefix_session_name?: boolean;
+}
+
+export type ParseConfigResult =
+	| { ok: true; config: PackageConfig; warnings: string[] }
+	| { ok: false; error: string };
+
+/** Parse the package config JSON. Pure — no filesystem access. Exported for testing. */
+export function parseConfigFile(content: string, file: string): ParseConfigResult {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch (err) {
+		return { ok: false, error: "Invalid JSON in " + file + ": " + err };
+	}
+
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { ok: false, error: "Config must be a JSON object in " + file };
+	}
+
+	const c = parsed as Record<string, unknown>;
+	const warnings: string[] = [];
+	const config: PackageConfig = {};
+
+	if (
+		"prefix_session_name" in c &&
+		c.prefix_session_name !== undefined &&
+		c.prefix_session_name !== null
+	) {
+		if (typeof c.prefix_session_name !== "boolean") {
+			return { ok: false, error: "prefix_session_name must be a boolean in " + file };
+		}
+		config.prefix_session_name = c.prefix_session_name;
+	}
+
+	for (const key of Object.keys(c)) {
+		if (!KNOWN_CONFIG_FIELDS.has(key)) {
+			warnings.push('unknown field "' + key + '" in ' + file + " (ignored)");
+		}
+	}
+
+	return { ok: true, config, warnings };
+}
+
+// --- session-name prefix helpers (exported for testing) --------------------
+
+/** True if `name` already starts with the `[profileName]` prefix tag. */
+export function hasProfilePrefix(name: string, profileName: string): boolean {
+	const tag = "[" + profileName + "]";
+	return name === tag || name.startsWith(tag + " ");
+}
+
+/**
+ * Prefix `name` with `[profileName] `. Returns undefined when there is nothing
+ * to do: no name, or the name already carries the prefix (avoids re-entrant
+ * double-prefixing when our own setSessionName re-fires session_info_changed).
+ */
+export function withProfilePrefix(
+	name: string | undefined,
+	profileName: string
+): string | undefined {
+	if (!name) return undefined;
+	if (hasProfilePrefix(name, profileName)) return undefined;
+	return "[" + profileName + "] " + name;
+}
+
 function expandTilde(p: string): string {
 	if (p.startsWith("~/")) {
 		return os.homedir() + p.slice(1);
@@ -102,6 +189,31 @@ function profilesDir(): string {
 
 function profilePath(name: string): string {
 	return path.join(profilesDir(), name + ".json");
+}
+
+function configPath(): string {
+	const override =
+		typeof process !== "undefined" && process.env && process.env.PI_PROFILES_CONFIG;
+	if (override) return expandTilde(override);
+	// Live in a subdir so listProfiles() (which scans top-level *.json) never
+	// mistakes the config for a profile.
+	return path.join(profilesDir(), "config", "config.json");
+}
+
+export type ReadConfigResult =
+	| { ok: true; config: PackageConfig; warnings: string[] }
+	| { ok: false; error: string };
+
+/** Read and parse the package config file. Missing file → defaults (no error). */
+function readConfigFile(): ReadConfigResult {
+	const file = configPath();
+	let content: string;
+	try {
+		content = readFileSync(file, "utf-8");
+	} catch {
+		return { ok: true, config: {}, warnings: [] };
+	}
+	return parseConfigFile(content, file);
 }
 
 export function isValidProfileName(name: string | undefined): name is string {
@@ -296,6 +408,7 @@ export default function (pi: ExtensionAPI) {
 	// The system prompt is per-turn and applied every turn.
 	let sessionConfigApplied = false;
 	let profileIssueWarned = false;
+	let configIssueWarned = false;
 
 	// Apply the profile before the agent starts
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -405,6 +518,66 @@ export default function (pi: ExtensionAPI) {
 			}
 			return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
 		}
+	});
+
+	// --- session-name prefix -------------------------------------------------
+	//
+	// When a profile is active and the prefix feature is enabled, prefix the
+	// session display name with "[<profile-name>]" so sessions group nicely
+	// in /resume and `pi -r`. Covers three name-setting paths:
+	//   - startup --name: applied to the session file before extensions load,
+	//     so session_start reads it back via getSessionName()
+	//   - /name slash command and RPC setSessionName(): fires session_info_changed
+	//   - this extension's own setSessionName(): re-fires session_info_changed;
+	//     hasProfilePrefix() short-circuits to prevent a re-entrant loop
+	function prefixEnabled(): boolean {
+		const result = readConfigFile();
+		if (!result.ok) {
+			if (!configIssueWarned) {
+				console.warn("[pi-agent-profiles] " + result.error);
+				configIssueWarned = true;
+			}
+			return true; // default on when config is unreadable
+		}
+		if (!configIssueWarned && result.warnings.length > 0) {
+			for (const w of result.warnings) console.warn("[pi-agent-profiles] " + w);
+			configIssueWarned = true;
+		}
+		const v = result.config.prefix_session_name;
+		return v === undefined ? true : v;
+	}
+
+	function activeProfileName(): string | undefined {
+		const flag = pi.getFlag("profile");
+		if (!flag) return undefined;
+		const name = typeof flag === "string" ? flag : String(flag);
+		return isValidProfileName(name) ? name : undefined;
+	}
+
+	function applyPrefixToCurrentName(): void {
+		if (!prefixEnabled()) return;
+		const profileName = activeProfileName();
+		if (!profileName) return;
+		const prefixed = withProfilePrefix(pi.getSessionName(), profileName);
+		if (prefixed) pi.setSessionName(prefixed);
+	}
+
+	// session_start covers startup --name, /new, /resume, /fork, and reload.
+	// On resume/fork the loaded name may already carry the prefix from a prior
+	// run; hasProfilePrefix skips it. On /new there is no name yet; the later
+	// session_info_changed from /name applies the prefix.
+	pi.on("session_start", async () => {
+		applyPrefixToCurrentName();
+	});
+
+	// session_info_changed covers /name, RPC setSessionName(), and our own
+	// re-entrant setSessionName() (which hasProfilePrefix short-circuits).
+	pi.on("session_info_changed", async (event) => {
+		if (!prefixEnabled()) return;
+		const profileName = activeProfileName();
+		if (!profileName) return;
+		const prefixed = withProfilePrefix(event.name, profileName);
+		if (prefixed) pi.setSessionName(prefixed);
 	});
 
 	// Register the /profiles management command

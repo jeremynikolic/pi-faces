@@ -92,7 +92,27 @@ cp profiles/*.json ~/.pi/agent-profiles/
 
 The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`. **Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely. Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
 
-See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls and the inline-vs-file system prompt behavior.
+## Session Name Prefix
+
+When a profile is active, the extension automatically prefixes the session display name with `[<profile-name>]` so sessions group together in `/resume` and `pi -r`.
+
+```text
+pi --profile planner --name "Refactor auth module"
+# → session shows as "[planner] Refactor auth module" in the selector
+```
+
+This applies to names set via `--name`, `/name`, or RPC `setSessionName()`. The prefix is **enabled by default** and controlled by a JSON config file:
+
+```bash
+mkdir -p ~/.pi/agent-profiles/config
+echo '{"prefix_session_name": false}' > ~/.pi/agent-profiles/config/config.json
+```
+
+| Config field | Type | Default | Effect |
+|---|---|---|---|
+| `prefix_session_name` | boolean | `true` | Prefix the session display name with `[profile]` while a profile is active |
+
+The config file is optional — when missing, defaults apply (prefix on). Override the config path with the `PI_PROFILES_CONFIG` environment variable (useful for per-launch overrides without editing the file). Unknown fields are warned; `null` is treated as absent. The prefix is only added when a profile is active (`--profile` is set) and the name does not already carry the tag, so resuming a previously-prefixed session is not double-prefixed.
 
 ## License
 

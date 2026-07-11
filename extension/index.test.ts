@@ -14,7 +14,11 @@ import factory, {
 	resolveSystemPrompt,
 	isValidProfileName,
 	parseProfileFile,
+	parseConfigFile,
+	hasProfilePrefix,
+	withProfilePrefix,
 	type Profile,
+	type PackageConfig,
 } from "./index.ts";
 
 // Mock node:fs only for renameSync so we can force the sibling-directory move to
@@ -48,7 +52,12 @@ interface PiCalls {
 	setThinkingLevel: unknown[];
 	setActiveTools: unknown[][];
 	sendMessage: { customType: string; content: string; display: boolean }[];
+	setSessionName: string[];
 }
+
+// Generic event handler shape — the same mock stores handlers for every event
+// (before_agent_start, session_start, session_info_changed, ...).
+type AnyHandler = (event: any, ctx: ExtensionContext) => unknown;
 
 type BeforeAgentHandler = (
 	event: BeforeAgentStartEvent,
@@ -56,16 +65,19 @@ type BeforeAgentHandler = (
 ) => Promise<BeforeAgentStartEventResult | void> | BeforeAgentStartEventResult | void;
 
 function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
-	const handlers = new Map<string, BeforeAgentHandler[]>();
+	const handlers = new Map<string, AnyHandler[]>();
 	const commands = new Map<string, CapturedCommand>();
 	const allTools: { name: string }[] = [
 		{ name: "read" }, { name: "bash" }, { name: "edit" }, { name: "write" }, { name: "grep" }, { name: "find" }, { name: "ls" },
 	];
+	// Mutable session name state so getSessionName/setSessionName round-trip like
+	// the real SessionManager: setSessionName updates it, getSessionName reads it.
+	let sessionName: string | undefined;
 
 	const pi = {
 		getFlag: (n: string) => flags.get(n),
 		registerFlag: () => {},
-		on: (ev: string, h: BeforeAgentHandler) => {
+		on: (ev: string, h: AnyHandler) => {
 			const list = handlers.get(ev) ?? [];
 			list.push(h);
 			handlers.set(ev, list);
@@ -81,8 +93,23 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		setThinkingLevel: (level: unknown) => calls.setThinkingLevel.push(level),
 		setActiveTools: (tools: string[]) => calls.setActiveTools.push(tools),
 		getAllTools: () => allTools,
+		getSessionName: () => sessionName,
+		setSessionName: (name: string) => {
+			sessionName = name;
+			calls.setSessionName.push(name);
+		},
 	} as unknown as ExtensionAPI;
-	return { pi, handlers, command: (name: string) => commands.get(name) };
+	return {
+		pi,
+		handlers,
+		command: (name: string) => commands.get(name),
+		// Seed the session name state without recording a setSessionName call,
+		// simulating startup --name which is written to the file before any
+		// extension event fires.
+		setSessionNameState: (name: string | undefined) => {
+			sessionName = name;
+		},
+	};
 }
 
 interface UiOpts {
@@ -130,7 +157,7 @@ function event(sp?: string): BeforeAgentStartEvent {
 }
 
 function makeCalls(): PiCalls {
-	return { setModel: [], setThinkingLevel: [], setActiveTools: [], sendMessage: [] };
+	return { setModel: [], setThinkingLevel: [], setActiveTools: [], sendMessage: [], setSessionName: [] };
 }
 
 function setupCommand() {
@@ -158,6 +185,11 @@ afterEach(() => {
 
 function writeProfile(name: string, profile: Profile): void {
 	writeFileSync(join(dir, name + ".json"), JSON.stringify(profile));
+}
+
+function writeConfig(config: PackageConfig): void {
+	mkdirSync(join(dir, "config"), { recursive: true });
+	writeFileSync(join(dir, "config", "config.json"), JSON.stringify(config));
 }
 
 // --- pure helpers -----------------------------------------------------------
@@ -621,5 +653,161 @@ describe("second-pass review coverage", () => {
 		expect(calls.setThinkingLevel).toEqual(["high"]);
 		expect(calls.setActiveTools).toEqual([["read"]]);
 		expect(r.systemPrompt).toContain("sp");
+	});
+});
+
+// --- session-name prefix feature -------------------------------------------
+
+describe("parseConfigFile", () => {
+	it("accepts an empty object (all defaults)", () => {
+		const r = parseConfigFile("{}", "config.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
+	});
+	it("accepts prefix_session_name true/false", () => {
+		expect(parseConfigFile('{"prefix_session_name":true}', "c").ok).toBe(true);
+		expect(parseConfigFile('{"prefix_session_name":false}', "c").ok).toBe(true);
+	});
+	it("treats null/absent prefix_session_name as absent", () => {
+		const r = parseConfigFile('{"prefix_session_name":null}', "c");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
+	});
+	it("rejects non-boolean prefix_session_name", () => {
+		expect(parseConfigFile('{"prefix_session_name":"yes"}', "c").ok).toBe(false);
+		expect(parseConfigFile('{"prefix_session_name":0}', "c").ok).toBe(false);
+	});
+	it("rejects non-object JSON", () => {
+		for (const c of ["[]", "null", '"hi"', "42"]) {
+			expect(parseConfigFile(c, "c").ok).toBe(false);
+		}
+	});
+	it("rejects invalid JSON", () => {
+		expect(parseConfigFile("{not json", "c").ok).toBe(false);
+	});
+	it("warns on unknown fields (typos)", () => {
+		const r = parseConfigFile('{"prefix_sesion_name":false}', "config.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.warnings).toContain('unknown field "prefix_sesion_name" in config.json (ignored)');
+	});
+});
+
+describe("hasProfilePrefix / withProfilePrefix", () => {
+	it("detects exact-tag and tag+space, ignores other prefixes", () => {
+		expect(hasProfilePrefix("[planner]", "planner")).toBe(true);
+		expect(hasProfilePrefix("[planner] Foo", "planner")).toBe(true);
+		expect(hasProfilePrefix("[other] Foo", "planner")).toBe(false);
+		expect(hasProfilePrefix("Foo", "planner")).toBe(false);
+		expect(hasProfilePrefix("[planner]Foo", "planner")).toBe(false); // no space boundary
+	});
+	it("withProfilePrefix returns undefined for no name or already-prefixed", () => {
+		expect(withProfilePrefix(undefined, "planner")).toBeUndefined();
+		expect(withProfilePrefix("", "planner")).toBeUndefined();
+		expect(withProfilePrefix("[planner] Foo", "planner")).toBeUndefined();
+		expect(withProfilePrefix("[planner]", "planner")).toBeUndefined();
+	});
+	it("withProfilePrefix prepends the tag for a plain name", () => {
+		expect(withProfilePrefix("Foo", "planner")).toBe("[planner] Foo");
+		expect(withProfilePrefix("[other] Foo", "planner")).toBe("[planner] [other] Foo");
+	});
+});
+
+// Helper: build a pi instance with a profile flag and pre-seeded session name.
+function setupPrefix(profile: string | undefined, sessionName?: string) {
+	const calls = makeCalls();
+	const flags = new Map<string, boolean | string>();
+	if (profile !== undefined) flags.set("profile", profile);
+	const r = makePi(calls, flags);
+	if (sessionName !== undefined) r.setSessionNameState(sessionName);
+	factory(r.pi);
+	return { calls, handlers: r.handlers, pi: r.pi };
+}
+
+describe("session_start prefix hook", () => {
+	it("prefixes an existing --name on startup when a profile is active", async () => {
+		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Refactor auth"]);
+	});
+
+	it("does nothing when no profile is active", async () => {
+		const { calls, handlers } = setupPrefix(undefined, "Refactor auth");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("skips a name that already carries the prefix (resume of a pre-prefixed session)", async () => {
+		const { calls, handlers } = setupPrefix("planner", "[planner] Refactor auth");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "resume" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("does nothing when there is no session name yet (/new)", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "new" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("is disabled by config prefix_session_name=false", async () => {
+		writeConfig({ prefix_session_name: false });
+		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("ignores an invalid profile name (no prefix tag from a bad flag)", async () => {
+		const { calls, handlers } = setupPrefix("../p", "Refactor auth");
+		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+});
+
+describe("session_info_changed prefix hook", () => {
+	it("prefixes a plain name set via /name or RPC", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("does not re-prefix (no loop) when the name already carries the tag", async () => {
+		// Simulates the re-entrant emit from our own setSessionName():
+		// pi emits session_info_changed again with the prefixed name.
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "[planner] Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("does nothing when the name is cleared (undefined)", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: undefined }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("does nothing when no profile is active", async () => {
+		const { calls, handlers } = setupPrefix(undefined);
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("is disabled by config prefix_session_name=false", async () => {
+		writeConfig({ prefix_session_name: false });
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("stays enabled when the config file is absent (default on)", async () => {
+		// No writeConfig call — config file missing → defaults → prefix on.
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("stays enabled when config explicitly sets prefix_session_name=true", async () => {
+		writeConfig({ prefix_session_name: true });
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
 	});
 });

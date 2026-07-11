@@ -72,7 +72,7 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 |---|---|---|
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
 | `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
-| `model` | Model ID | Yes (requires provider) |
+| `model` | Model ID — bare (`glm-5.2`, paired with `provider`), combined `provider/id` (`ollama-cloud/glm-5.2`), or `provider/id:thinking` (the `:thinking` is used only if `thinking` is unset) | Yes (requires provider unless combined) |
 | `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
 | `tools` | Tool allowlist as array of strings | Yes |
 | `system_prompt` | Inline text or path to a file | Yes |

@@ -63,10 +63,12 @@ export class ProfileApplier {
 		}
 
 		// Model + provider. The `model` field accepts either a bare id
-		// ("glm-5.2", paired with `provider`) or a combined "provider/id"
-		// ("ollama-cloud/glm-5.2"), matching pi's --model convention. Skip if
-		// the user passed --model or --provider explicitly.
-		const { provider, modelId } = parseModelRef(profile.provider, profile.model);
+		// ("glm-5.2", paired with `provider`), a combined "provider/id"
+		// ("ollama-cloud/glm-5.2"), or "provider/id:thinking" (matching pi's
+		// --model convention; the :thinking is used only if the profile has no
+		// separate `thinking` field). Skip if the user passed --model or
+		// --provider explicitly.
+		const { provider, modelId, thinkingHint } = parseModelRef(profile.provider, profile.model);
 		const modelExplicit = cliFlagProvided("model") || cliFlagProvided("provider");
 		if (modelExplicit) {
 			// pi already applied the user's --model/--provider; leave it.
@@ -90,8 +92,10 @@ export class ProfileApplier {
 			}
 		}
 
-		// Thinking level. Skip if the user passed --thinking explicitly.
-		const thinking = profile.thinking;
+		// Thinking level. A separate `thinking` field wins; otherwise use a
+		// ":thinking" hint parsed from the model field. Skip if the user passed
+		// --thinking explicitly.
+		const thinking = profile.thinking ?? thinkingHint;
 		if (thinking && !cliFlagProvided("thinking")) {
 			try {
 				this.pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
@@ -159,10 +163,21 @@ export class ProfileApplier {
 export function parseModelRef(
 	provider: string | undefined,
 	model: string | undefined
-): { provider: string | undefined; modelId: string | undefined } {
+): { provider: string | undefined; modelId: string | undefined; thinkingHint: string | undefined } {
+	let modelId = model;
+	let thinkingHint: string | undefined;
 	if (typeof model === "string" && model.includes("/")) {
 		const slash = model.indexOf("/");
-		return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
+		provider = model.slice(0, slash);
+		modelId = model.slice(slash + 1);
 	}
-	return { provider, modelId: model };
+	// pi's --model also supports an optional ":<thinking>" suffix. Strip it so
+	// modelRegistry.find gets the bare id, and surface it as a thinking hint
+	// (used only when the profile has no separate `thinking` field).
+	if (typeof modelId === "string" && modelId.includes(":")) {
+		const colon = modelId.indexOf(":");
+		thinkingHint = modelId.slice(colon + 1);
+		modelId = modelId.slice(0, colon);
+	}
+	return { provider, modelId, thinkingHint };
 }

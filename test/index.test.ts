@@ -845,22 +845,38 @@ describe("session_info_changed prefix hook", () => {
 
 describe("parseModelRef + combined model format", () => {
 	it("splits a combined provider/id model field", () => {
-		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
 	});
 	it("uses the separate provider when model has no slash", () => {
-		expect(parseModelRef("ollama-cloud", "glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+		expect(parseModelRef("ollama-cloud", "glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
 	});
 	it("combined model field ignores a redundant separate provider", () => {
-		expect(parseModelRef("ollama-cloud", "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+		expect(parseModelRef("ollama-cloud", "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
 	});
 	it("bare model with no provider yields undefined provider", () => {
-		expect(parseModelRef(undefined, "glm-5.2")).toEqual({ provider: undefined, modelId: "glm-5.2" });
+		expect(parseModelRef(undefined, "glm-5.2")).toEqual({ provider: undefined, modelId: "glm-5.2", thinkingHint: undefined });
+	});
+	it("strips a :thinking suffix from the model id and surfaces it as a hint", () => {
+		expect(parseModelRef("ollama-cloud", "glm-5.2:high")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: "high" });
+		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2:xhigh")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: "xhigh" });
 	});
 
 	it("session_start applies a combined-format model + thinking", async () => {
 		writeProfile("brain", { model: "ollama-cloud/glm-5.2", thinking: "high", system_prompt: "sp" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "brain"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+	});
+
+	it("session_start applies a :thinking hint from the model field when thinking is unset", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high", system_prompt: "sp" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));

@@ -820,3 +820,71 @@ describe("session_info_changed prefix hook", () => {
 		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
 	});
 });
+
+describe("CLI flag overrides (profile = default, explicit flags win)", () => {
+	const originalArgv = process.argv;
+	afterEach(() => {
+		process.argv = originalArgv;
+	});
+
+	it("cliFlagProvided detects --model and --name=value forms", async () => {
+		const { cliFlagProvided } = await import("../src/cli.ts");
+		process.argv = ["node", "pi", "--model", "glm-5.2"];
+		expect(cliFlagProvided("model")).toBe(true);
+		expect(cliFlagProvided("thinking")).toBe(false);
+		process.argv = ["node", "pi", "--tools=read,bash"];
+		expect(cliFlagProvided("tools", "t")).toBe(true);
+		process.argv = ["node", "pi", "-t", "read"];
+		expect(cliFlagProvided("tools", "t")).toBe(true);
+		process.argv = ["node", "pi", "-p", "hello --model world"];
+		expect(cliFlagProvided("model")).toBe(false); // not a standalone --model token
+	});
+
+	it("--model explicit skips profile model but still applies thinking/tools", async () => {
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		process.argv = ["node", "pi", "--profile", "p", "--model", "ollama-cloud/glm-5.2"];
+		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+		expect(calls.setActiveTools).toEqual([["read"]]);
+	});
+
+	it("--thinking explicit skips profile thinking but still applies model", async () => {
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		process.argv = ["node", "pi", "--profile", "p", "--thinking", "low"];
+		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toHaveLength(0);
+	});
+
+	it("--tools explicit skips profile tools but still applies model", async () => {
+		writeProfile("p", { provider: "x", model: "y", tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		process.argv = ["node", "pi", "--profile", "p", "--tools", "bash"];
+		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+
+	it("-t short flag also skips profile tools", async () => {
+		writeProfile("p", { provider: "x", model: "y", tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		process.argv = ["node", "pi", "--profile", "p", "-t", "bash"];
+		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+});

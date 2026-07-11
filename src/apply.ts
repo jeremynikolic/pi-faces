@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { profilesDir } from "./paths.ts";
 import { isValidProfileName, readProfile, resolveSystemPrompt } from "./profile.ts";
+import { cliFlagProvided } from "./cli.ts";
 
 /**
  * Applies the active profile in `before_agent_start`. Session-level config
@@ -62,9 +63,14 @@ export class ProfileApplier {
 
 			// Model + provider. setModel takes a Model resolved from the registry,
 			// not a provider/modelId pair. Require both provider and model.
+			// Skip if the user passed --model or --provider explicitly so the
+			// profile acts as a default that CLI options override.
 			const provider = profile.provider;
 			const modelId = profile.model;
-			if ((provider && !modelId) || (modelId && !provider)) {
+			const modelExplicit = cliFlagProvided("model") || cliFlagProvided("provider");
+			if (modelExplicit) {
+				// pi already applied the user's --model/--provider; leave it.
+			} else if ((provider && !modelId) || (modelId && !provider)) {
 				console.warn(
 					"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
 				);
@@ -84,9 +90,9 @@ export class ProfileApplier {
 				}
 			}
 
-			// Thinking level
+			// Thinking level. Skip if the user passed --thinking explicitly.
 			const thinking = profile.thinking;
-			if (thinking) {
+			if (thinking && !cliFlagProvided("thinking")) {
 				try {
 					this.pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
 				} catch (err) {
@@ -96,8 +102,9 @@ export class ProfileApplier {
 
 			// Tools. Filter to known tools (ghost entries silently no-op in pi
 			// but mask misconfigurations), dedup, and warn on unknown names.
+			// Skip if the user passed --tools/-t explicitly.
 			const tools = profile.tools;
-			if (tools && tools.length > 0) {
+			if (tools && tools.length > 0 && !cliFlagProvided("tools", "t")) {
 				try {
 					const known = new Set(this.pi.getAllTools().map((t) => t.name));
 					const knownTools = tools.filter((t) => known.has(t));

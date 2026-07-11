@@ -124,6 +124,8 @@ The extension registers a `--profile` CLI flag, a `/profiles` slash command, and
 
 Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
 
+**Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, or `--tools`/`-t` on the command line, the corresponding profile field is skipped for that run, so a profile sets your defaults and a one-off flag overrides them (e.g. `pi --profile planner --model ollama-cloud/kimi-k2.7-code`).
+
 ## Session Name Prefix
 
 When a profile is active, the extension automatically prefixes the session display name with `[<profile-name>]` so sessions group together in `/resume` and `pi -r`.

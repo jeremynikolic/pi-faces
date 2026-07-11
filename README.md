@@ -48,7 +48,8 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
   "model": "claude-sonnet-4",
   "thinking": "high",
   "tools": ["read", "bash", "grep"],
-  "system_prompt": "You are a planning agent..."
+  "system_prompt": "You are a planning agent...",
+  "replace_system_prompt": false
 }
 ```
 
@@ -57,11 +58,12 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
 | `provider` | Provider ID (anthropic, openai, etc.) | Yes |
 | `model` | Model ID | Yes (requires provider) |
-| `thinking` | off / minimal / low / medium / high / xhigh | Yes |
+| `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
 | `tools` | Tool allowlist as array of strings | Yes |
 | `system_prompt` | Inline text or path to a file | Yes |
+| `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt. `true`: replace it entirely. | Yes |
 
-`system_prompt` accepts either an inline string or a file path. File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work. If the string is not a readable file path, it is treated as inline text.
+`system_prompt` accepts either an inline string or a file path. File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work. If the string is not a readable file path, it is treated as inline text. Unknown fields are reported as a warning (catches typos).
 
 ## Managing Profiles
 
@@ -88,9 +90,9 @@ cp profiles/*.json ~/.pi/agent-profiles/
 
 ## How It Works
 
-The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON before each agent run via `before_agent_start`. Settings are applied through pi's extension hostcalls: `setModel()`, `setThinkingLevel()`, `setActiveTools()`, and a `{ systemPrompt }` return. Pi's own config precedence still applies for anything the profile doesn't set.
+The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`. **Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely. Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
 
-See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls and the inline-vs-file system prompt behavior.
+See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls, aliases, and the inline-vs-file system prompt behavior.
 
 ## License
 

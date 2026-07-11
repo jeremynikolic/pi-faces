@@ -1,6 +1,6 @@
 ---
 name: pi-agent-profiles
-description: Set up and manage pi agent profiles. Profiles bundle model, provider, thinking level, tools, and system prompt into a single JSON file, selected via the --profile CLI flag.
+description: Set up and manage pi agent profiles. Profiles bundle a short description, model, provider, thinking level, tools, and a system prompt into a single JSON file, selected via the --profile CLI flag and managed with the /profiles command.
 ---
 
 # Pi Agent Profiles
@@ -59,7 +59,8 @@ Write a JSON file per role, or use `/profiles new <name>` (see "Managing Profile
   "model": "claude-sonnet-4",
   "thinking": "high",
   "tools": ["read", "bash", "grep", "find", "ls"],
-  "system_prompt": "You are a planning agent. Your job is to..."
+  "system_prompt": "You are a planning agent. Your job is to...",
+  "replace_system_prompt": false
 }
 ```
 
@@ -68,9 +69,12 @@ Write a JSON file per role, or use `/profiles new <name>` (see "Managing Profile
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
 | `provider` | Provider ID (anthropic, openai, etc.) | Yes |
 | `model` | Model ID | Yes (requires provider) |
-| `thinking` | off / minimal / low / medium / high / xhigh | Yes |
+| `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
 | `tools` | Tool allowlist as array of strings | Yes |
 | `system_prompt` | Inline text or path to a file | Yes |
+| `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt (preserving tool guidance and project context). `true`: replace it entirely. | Yes |
+
+Unknown fields are reported as a warning (helps catch typos like `system_promt`).
 
 ### System prompt: inline vs file path
 
@@ -135,14 +139,16 @@ EOF
 
 Use the `/profiles` command inside a pi session:
 
-| Action | Command |
+| Action | Command (aliases in parentheses) |
 |---|---|
-| List profiles (name + description) | `/profiles` or `/profiles list` |
-| Show a profile's full JSON | `/profiles show <name>` |
-| Create a profile (scaffold + edit) | `/profiles new <name>` |
+| List profiles (name + description) | `/profiles` or `/profiles list` (`ls`) |
+| Show a profile's full JSON | `/profiles show <name>` (`cat`) |
+| Create a profile (scaffold + edit) | `/profiles new <name>` (`create`) |
 | Edit a profile in the editor | `/profiles edit <name>` |
-| Delete a profile (with confirm) | `/profiles delete <name>` |
-| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
+| Delete a profile (with confirm) | `/profiles delete <name>` (`rm`, `remove`) |
+| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` (`mv`) |
+
+Tab completion: after `/profiles ` you get subcommand names; after `show`/`edit`/`delete`/`rename` you get existing profile names (`rename` completes only the source, never the target).
 
 `/profiles list` and `/profiles show` print into the conversation, so an agent can read the available profiles and their purposes. `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts); `edit` and `delete` use interactive dialogs and require an interactive session. `rename` requires an interactive session only when the target already exists (to confirm overwrite).
 
@@ -172,11 +178,11 @@ The extension hooks two pi APIs:
 2. `before_agent_start` event — reads the profile JSON and applies settings before the model processes any input
 3. `registerCommand("profiles", ...)` — registers the `/profiles` slash command for listing and managing profiles
 
-Settings are applied via pi's extension hostcalls. The flag is read with `pi.getFlag("profile")` and each setting is applied through the `pi` API (not the event context):
-- `setModel(model)` — changes the active provider and model. The `Model` is resolved from `ctx.modelRegistry.find(provider, modelId)` (the profile supplies `provider` + `model`, not a `Model` object directly).
+Settings are applied via pi's extension hostcalls. The flag is read with `pi.getFlag("profile")` and each setting is applied through the `pi` API (not the event context). **Model, thinking, and tools are applied once per session** so mid-session user changes (e.g. `/model`) are not reverted on the next turn. The system prompt is applied every turn.
+- `setModel(model)` — changes the active provider and model. The `Model` is resolved from `ctx.modelRegistry.find(provider, modelId)` (the profile supplies `provider` + `model`, not a `Model` object directly). Both must be set, or neither is applied.
 - `setThinkingLevel(level)` — changes the thinking level
-- `setActiveTools(tools)` — restricts the tool allowlist
-- `before_agent_start` return `{ systemPrompt }` — replaces the system prompt
+- `setActiveTools(tools)` — restricts the tool allowlist. Unknown tool names are filtered out and warned; duplicates are removed.
+- `before_agent_start` return `{ systemPrompt }` — by default the profile prompt is **appended** to `event.systemPrompt`. Set `replace_system_prompt: true` to return it alone.
 
 Relative `system_prompt` paths resolve against the profile JSON's directory (`~/.pi/agent-profiles`), so `./<name>/system-prompt.md` reads `~/.pi/agent-profiles/<name>/system-prompt.md`.
 
@@ -184,8 +190,10 @@ Pi's own config precedence still applies for anything the profile doesn't set (A
 
 ## Pitfalls
 
-- **Profile must be valid JSON**: The extension logs a warning and falls back to pi defaults if the JSON is invalid.
-- **All fields optional**: If a field is missing from the JSON, pi keeps its default for that setting. `description` is metadata only and never changes agent behavior.
-- **system_prompt replaces default**: The system prompt from the profile replaces pi's built-in system prompt entirely.
-- **File path resolution**: Relative paths in `system_prompt` resolve relative to the profile JSON's directory. If the string is not a readable file, it is treated as inline text.
+- **Profile must be valid JSON**: The extension logs a warning once and falls back to pi defaults if the JSON is invalid. Warnings are emitted at most once per session.
+- **All fields optional**: If a field is missing from the JSON, pi keeps its default for that setting. `description` is metadata only and never changes agent behavior. A `null` value is treated the same as absent.
+- **system_prompt appends by default**: The profile prompt is appended to pi's built-in system prompt so tool guidance and project context survive. Set `replace_system_prompt: true` only if you want the profile prompt to replace the built-in prompt entirely — that strips pi's tool instructions.
+- **Applied once per session**: model/thinking/tools are applied on the first turn only. Edit a profile and run `/reload` to re-apply; mid-session `/model` changes are not reverted.
+- **File path resolution**: Relative paths in `system_prompt` resolve relative to the profile JSON's directory. If the string is not a readable file, it is treated as inline text — so a short inline prompt that happens to match a filename is read as a file.
+- **Provider and model are paired**: setting only one of `provider`/`model` logs a warning and the model is not changed.
 - **Env var override**: Set `PI_PROFILES_DIR` to use a different profiles directory (default: `~/.pi/agent-profiles`).

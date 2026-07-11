@@ -2,53 +2,125 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	ExtensionUIContext,
+	BeforeAgentStartEvent,
+	BeforeAgentStartEventResult,
+} from "@earendil-works/pi-coding-agent";
 import factory, {
 	resolveSystemPrompt,
 	isValidProfileName,
 	parseProfileFile,
+	type Profile,
 } from "./index.ts";
 
-// Stub helpers ---------------------------------------------------------------
+// --- typed stubs (no `any`) --------------------------------------------------
 
-function makePi() {
-	const calls: { setModel: unknown[]; setThinkingLevel: unknown[]; setActiveTools: unknown[]; sendMessage: unknown[]; getAllTools: () => unknown[] } = {
-		setModel: [],
-		setThinkingLevel: [],
-		setActiveTools: [],
-		sendMessage: [],
-		getAllTools: () => [],
-	};
-	const flags = new Map<string, boolean | string>();
-	const handlers = new Map<string, ((e: unknown, ctx: unknown) => unknown)[]>();
-	const pi: any = {
+interface CapturedCommand {
+	description: string;
+	getArgumentCompletions: (argPrefix: string) => unknown;
+	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+}
+
+interface PiCalls {
+	setModel: unknown[];
+	setThinkingLevel: unknown[];
+	setActiveTools: unknown[][];
+	sendMessage: { customType: string; content: string; display: boolean }[];
+}
+
+type BeforeAgentHandler = (
+	event: BeforeAgentStartEvent,
+	ctx: ExtensionContext
+) => Promise<BeforeAgentStartEventResult | void> | BeforeAgentStartEventResult | void;
+
+function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
+	const handlers = new Map<string, BeforeAgentHandler[]>();
+	let command: CapturedCommand | undefined;
+	const allTools: { name: string }[] = [
+		{ name: "read" }, { name: "bash" }, { name: "edit" }, { name: "write" }, { name: "grep" }, { name: "find" }, { name: "ls" },
+	];
+
+	const pi = {
 		getFlag: (n: string) => flags.get(n),
 		registerFlag: () => {},
-		on: (ev: string, h: (e: unknown, ctx: unknown) => unknown) => {
+		on: (ev: string, h: BeforeAgentHandler) => {
 			const list = handlers.get(ev) ?? [];
 			list.push(h);
 			handlers.set(ev, list);
 		},
-		registerCommand: () => {},
-		sendMessage: (m: unknown) => calls.sendMessage.push(m),
+		registerCommand: (_name: string, o: CapturedCommand) => {
+			command = o;
+		},
+		sendMessage: (m: { customType: string; content: string; display: boolean }) => calls.sendMessage.push(m),
 		setModel: async (model: unknown) => {
 			calls.setModel.push(model);
 			return true;
 		},
 		setThinkingLevel: (level: unknown) => calls.setThinkingLevel.push(level),
-		setActiveTools: (tools: unknown) => calls.setActiveTools.push(tools),
-		getAllTools: () => calls.getAllTools(),
-	};
-	return { pi, calls, flags, handlers };
+		setActiveTools: (tools: string[]) => calls.setActiveTools.push(tools),
+		getAllTools: () => allTools,
+	} as unknown as ExtensionAPI;
+	return { pi, handlers, command: () => command };
 }
 
-function makeCtx(overrides: Record<string, unknown> = {}) {
-	const ui = {
-		notify: () => {},
-		confirm: async () => false,
-		input: async () => undefined,
-		editor: async () => undefined,
-	};
-	return { ui, hasUI: false, mode: "print" as const, cwd: process.cwd(), ...overrides };
+interface UiOpts {
+	notify?: (m: string, t?: "info" | "warning" | "error") => void;
+	confirm?: () => Promise<boolean>;
+	input?: () => Promise<string | undefined>;
+	editor?: () => Promise<string | undefined>;
+}
+
+function uiStub(opts: UiOpts = {}): ExtensionUIContext {
+	return {
+		notify: opts.notify ?? (() => {}),
+		confirm: opts.confirm ?? (async () => false),
+		input: opts.input ?? (async () => undefined),
+		editor: opts.editor ?? (async () => undefined),
+	} as unknown as ExtensionUIContext;
+}
+
+interface CtxOpts {
+	ui?: ExtensionUIContext;
+	hasUI?: boolean;
+	modelRegistry?: ExtensionContext["modelRegistry"];
+}
+
+function makeCtx(opts: CtxOpts = {}): ExtensionCommandContext {
+	return {
+		ui: opts.ui ?? uiStub(),
+		hasUI: opts.hasUI ?? false,
+		mode: "print",
+		cwd: process.cwd(),
+		modelRegistry: opts.modelRegistry,
+	} as unknown as ExtensionCommandContext;
+}
+
+function modelCtx(findImpl: (p: string, m: string) => unknown): ExtensionCommandContext {
+	return makeCtx({ modelRegistry: { find: findImpl } as unknown as ExtensionContext["modelRegistry"] });
+}
+
+function event(sp?: string): BeforeAgentStartEvent {
+	return {
+		type: "before_agent_start",
+		prompt: "",
+		systemPrompt: sp ?? "BUILT-IN",
+	} as BeforeAgentStartEvent;
+}
+
+function makeCalls(): PiCalls {
+	return { setModel: [], setThinkingLevel: [], setActiveTools: [], sendMessage: [] };
+}
+
+function setupCommand() {
+	const calls = makeCalls();
+	const flags = new Map<string, boolean | string>();
+	const { pi, command } = makePi(calls, flags);
+	factory(pi);
+	return { calls, flags, command };
 }
 
 // setup/teardown -------------------------------------------------------------
@@ -65,20 +137,20 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-// pure helpers ---------------------------------------------------------------
+function writeProfile(name: string, profile: Profile): void {
+	writeFileSync(join(dir, name + ".json"), JSON.stringify(profile));
+}
+
+// --- pure helpers -----------------------------------------------------------
 
 describe("isValidProfileName", () => {
 	it("accepts a normal name", () => {
 		expect(isValidProfileName("planner")).toBe(true);
 	});
 	it("rejects path traversal and special names", () => {
-		expect(isValidProfileName("")).toBe(false);
-		expect(isValidProfileName(undefined)).toBe(false);
-		expect(isValidProfileName("../other")).toBe(false);
-		expect(isValidProfileName("a/b")).toBe(false);
-		expect(isValidProfileName("a\\b")).toBe(false);
-		expect(isValidProfileName(".")).toBe(false);
-		expect(isValidProfileName("..")).toBe(false);
+		for (const bad of ["", undefined, "../other", "a/b", "a\\b", ".", ".."]) {
+			expect(isValidProfileName(bad as string | undefined)).toBe(false);
+		}
 	});
 });
 
@@ -88,19 +160,27 @@ describe("parseProfileFile", () => {
 		expect(r.ok).toBe(true);
 	});
 	it("rejects non-object JSON", () => {
-		expect(parseProfileFile("[]", "f.json").ok).toBe(false);
-		expect(parseProfileFile("null", "f.json").ok).toBe(false);
-		expect(parseProfileFile('"hi"', "f.json").ok).toBe(false);
-		expect(parseProfileFile("42", "f.json").ok).toBe(false);
+		for (const c of ["[]", "null", '"hi"', "42"]) {
+			expect(parseProfileFile(c, "f.json").ok).toBe(false);
+		}
 	});
 	it("rejects invalid field types", () => {
 		expect(parseProfileFile('{"description":5}', "f.json").ok).toBe(false);
 		expect(parseProfileFile('{"tools":"read"}', "f.json").ok).toBe(false);
 		expect(parseProfileFile('{"tools":[1]}', "f.json").ok).toBe(false);
 		expect(parseProfileFile('{"thinking":"nope"}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"replace_system_prompt":"yes"}', "f.json").ok).toBe(false);
 	});
 	it("rejects invalid JSON", () => {
 		expect(parseProfileFile("{not json", "f.json").ok).toBe(false);
+	});
+	it("treats null fields as absent", () => {
+		expect(parseProfileFile('{"tools":null,"thinking":null,"provider":null}', "f.json").ok).toBe(true);
+	});
+	it("warns on unknown keys (typos)", () => {
+		const r = parseProfileFile('{"system_promt":"x"}', "f.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.warnings).toContain('unknown field "system_promt" in f.json (ignored)');
 	});
 });
 
@@ -125,157 +205,293 @@ describe("resolveSystemPrompt", () => {
 	it("falls back to inline text when the relative path is not a file", () => {
 		expect(resolveSystemPrompt("./missing.md", dir)).toBe("./missing.md");
 	});
-	it("reads absolute and ~/ paths", () => {
+	it("reads absolute paths", () => {
 		const abs = join(dir, "abs.md");
 		writeFileSync(abs, "absolute");
 		expect(resolveSystemPrompt(abs, dir)).toBe("absolute");
 	});
 });
 
-// before_agent_start --------------------------------------------------------
+// --- before_agent_start -----------------------------------------------------
 
 describe("before_agent_start", () => {
 	it("does nothing when the flag is unset", async () => {
-		const { pi, handlers } = makePi();
+		const calls = makeCalls();
+		const { pi, handlers } = makePi(calls, new Map());
 		factory(pi);
-		const r = await handlers.get("before_agent_start")![0]({}, makeCtx());
+		const r = await handlers.get("before_agent_start")![0](event(), makeCtx());
 		expect(r).toBeUndefined();
-	});
-
-	it("rejects a path-traversal profile name", async () => {
-		const { pi, handlers, calls, flags } = makePi();
-		factory(pi);
-		flags.set("profile", "../other");
-		await handlers.get("before_agent_start")![0]({}, makeCtx());
-		expect(calls.setModel).toHaveLength(0);
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-
-	it("warns and bails when the profile is missing", async () => {
-		const { pi, handlers, calls, flags } = makePi();
-		factory(pi);
-		flags.set("profile", "missing");
-		await handlers.get("before_agent_start")![0]({}, makeCtx());
 		expect(calls.setModel).toHaveLength(0);
 	});
 
-	it("warns and bails when the profile JSON is invalid", async () => {
+	it("rejects a path-traversal profile name once", async () => {
+		const calls = makeCalls();
+		const flags = new Map([["profile", "../other"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(calls.setModel).toHaveLength(0);
+	});
+
+	it("warns once and bails when the profile is missing", async () => {
+		const calls = makeCalls();
+		const flags = new Map([["profile", "missing"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(calls.setModel).toHaveLength(0);
+	});
+
+	it("warns once and bails when the profile JSON is invalid", async () => {
 		writeFileSync(join(dir, "bad.json"), "{not json");
-		const { pi, handlers, calls, flags } = makePi();
+		const calls = makeCalls();
+		const flags = new Map([["profile", "bad"]]);
+		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		flags.set("profile", "bad");
-		await handlers.get("before_agent_start")![0]({}, makeCtx());
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
 		expect(calls.setModel).toHaveLength(0);
 	});
 
-	it("applies model, thinking, tools, and system prompt", async () => {
-		writeFileSync(join(dir, "planner.json"), JSON.stringify({
+	it("applies model/thinking/tools once and appends the system prompt every turn", async () => {
+		writeProfile("planner", {
 			provider: "anthropic",
 			model: "claude-sonnet-4",
 			thinking: "high",
 			tools: ["read", "bash"],
 			system_prompt: "You are a planner.",
-		}));
-		const { pi, handlers, calls, flags } = makePi();
+		});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "planner"]]);
+		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		flags.set("profile", "planner");
-		const ctx = makeCtx({ modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } });
-		const r = await handlers.get("before_agent_start")![0]({}, ctx);
+		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
+		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		expect(calls.setModel).toHaveLength(1);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
 		expect(calls.setActiveTools).toEqual([["read", "bash"]]);
-		expect(r).toEqual({ systemPrompt: "You are a planner." });
+		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
+		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
+		expect(calls.setThinkingLevel).toHaveLength(1);
 	});
 
-	it("warns on unknown tools but still applies them", async () => {
-		writeFileSync(join(dir, "p.json"), JSON.stringify({ tools: ["read", "nope"] }));
-		const { pi, handlers, calls, flags } = makePi();
+	it("replaces the built-in prompt when replace_system_prompt is true", async () => {
+		writeProfile("p", { system_prompt: "ONLY THIS", replace_system_prompt: true });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		pi.getAllTools = () => [{ name: "read" }];
-		flags.set("profile", "p");
-		await handlers.get("before_agent_start")![0]({}, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read", "nope"]]);
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "ONLY THIS" });
+	});
+
+	it("warns when provider/model is only half-set and does not call setModel", async () => {
+		writeProfile("p", { provider: "anthropic" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), modelCtx(() => ({ id: "x" })));
+		expect(calls.setModel).toHaveLength(0);
+	});
+
+	it("filters unknown tools and dedups", async () => {
+		writeProfile("p", { tools: ["read", "read", "nope"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
 	it("warns when the model is not found in the registry", async () => {
-		writeFileSync(join(dir, "p.json"), JSON.stringify({ provider: "x", model: "y" }));
-		const { pi, handlers, calls, flags } = makePi();
+		writeProfile("p", { provider: "x", model: "y" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		flags.set("profile", "p");
-		const ctx = makeCtx({ modelRegistry: { find: () => undefined } });
-		await handlers.get("before_agent_start")![0]({}, ctx);
+		await handlers.get("before_agent_start")![0](event(), modelCtx(() => undefined));
 		expect(calls.setModel).toHaveLength(0);
+	});
+
+	it("skips setModel when ctx.modelRegistry is absent", async () => {
+		writeProfile("p", { provider: "x", model: "y" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = makeCtx();
+		delete (ctx as Partial<ExtensionCommandContext>).modelRegistry;
+		await handlers.get("before_agent_start")![0](event(), ctx);
+		expect(calls.setModel).toHaveLength(0);
+	});
+
+	it("resolves a system_prompt file path relative to the JSON dir", async () => {
+		writeFileSync(join(dir, "sp.md"), "file prompt");
+		writeProfile("p", { system_prompt: "./sp.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\nfile prompt" });
 	});
 });
 
-// /profiles command ----------------------------------------------------------
+// --- /profiles command ------------------------------------------------------
 
 describe("/profiles command", () => {
 	it("list prints an empty message when there are no profiles", async () => {
-		const { pi, calls } = makePi();
-		const ext: any = factory(pi);
-		// factory registers the command; we re-create to capture the handler
-		const { pi: pi2, handlers } = makePi();
-		factory(pi2);
-		const cmd = (pi2 as any)._cmd;
-		// The handler isn't exposed; exercise via the registerCommand capture.
+		const { calls, command } = setupCommand();
+		await command()!.handler("list", makeCtx());
+		expect(calls.sendMessage).toHaveLength(1);
+		expect(calls.sendMessage[0].content).toContain("No profiles found in");
 	});
 
-	it("list prints names + descriptions", async () => {
-		writeFileSync(join(dir, "planner.json"), JSON.stringify({ description: "plans work" }));
-		writeFileSync(join(dir, "coder.json"), JSON.stringify({ description: undefined }));
-		const { pi, calls } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("list", makeCtx());
+	it("list prints names + descriptions, sorted", async () => {
+		writeProfile("zebra", { description: "z" });
+		writeProfile("alpha", { description: "a" });
+		writeProfile("mid", {});
+		const { calls, command } = setupCommand();
+		await command()!.handler("list", makeCtx());
 		expect(calls.sendMessage).toHaveLength(1);
-		const body = (calls.sendMessage[0] as any).content as string;
-		expect(body).toContain("planner — plans work");
-		expect(body).toContain("coder — (no description)");
+		const body = calls.sendMessage[0].content;
+		expect(body.indexOf("alpha")).toBeLessThan(body.indexOf("mid"));
+		expect(body.indexOf("mid")).toBeLessThan(body.indexOf("zebra"));
+		expect(body).toContain("alpha — a");
+		expect(body).toContain("mid — (no description)");
+	});
+
+	it("default subcommand is list", async () => {
+		const { calls, command } = setupCommand();
+		await command()!.handler("", makeCtx());
+		expect(calls.sendMessage).toHaveLength(1);
+		expect(calls.sendMessage[0].content).toContain("No profiles found");
+	});
+
+	it("ls alias dispatches to list", async () => {
+		const { calls, command } = setupCommand();
+		await command()!.handler("ls", makeCtx());
+		expect(calls.sendMessage).toHaveLength(1);
+	});
+
+	it("show prints the profile JSON; cat alias does the same", async () => {
+		writeProfile("p", { description: "d" });
+		const { calls, command } = setupCommand();
+		await command()!.handler("cat p", makeCtx());
+		expect(calls.sendMessage[0].content).toContain('"description":"d"');
+	});
+
+	it("show with an invalid/missing name notifies and does not message", async () => {
+		const { calls, command } = setupCommand();
+		await command()!.handler("show ../x", makeCtx());
+		await command()!.handler("show nope", makeCtx());
+		expect(calls.sendMessage).toHaveLength(0);
 	});
 
 	it("new writes a scaffold when the destination is absent (no UI)", async () => {
-		const { pi } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("new demo", makeCtx());
+		const { command } = setupCommand();
+		await command()!.handler("new demo", makeCtx());
 		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 		const scaffold = JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8"));
 		expect(scaffold.description).toBe("TODO: describe this profile's purpose");
 	});
 
-	it("new bails non-interactively when the destination exists", async () => {
-		writeFileSync(join(dir, "demo.json"), '{"old":true}');
-		const { pi } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("new demo", makeCtx());
-		// file untouched (overwrite requires UI confirm)
-		expect(JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8"))).toEqual({ old: true });
+	it("create alias dispatches to new", async () => {
+		const { command } = setupCommand();
+		await command()!.handler("create demo", makeCtx());
+		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 	});
 
-	it("show prints the profile JSON", async () => {
-		writeFileSync(join(dir, "p.json"), '{"description":"d"}');
-		const { pi, calls } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("show p", makeCtx());
-		expect((calls.sendMessage[0] as any).content).toContain('{"description":"d"}');
+	it("new bails non-interactively when the destination exists", async () => {
+		writeProfile("demo", { description: "old" });
+		const { command } = setupCommand();
+		await command()!.handler("new demo", makeCtx());
+		expect(JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8")).description).toBe("old");
+	});
+
+	it("new with an invalid name notifies usage and writes nothing", async () => {
+		const { command } = setupCommand();
+		await command()!.handler("new ../x", makeCtx());
+		expect(existsSync(join(dir, "x.json"))).toBe(false);
+	});
+
+	it("edit requires an interactive session (no UI → notify, file untouched)", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("edit p", makeCtx());
+		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("d");
+	});
+
+	it("edit with UI saves valid JSON", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => '{"description":"edited"}' }) }));
+		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("edited");
+	});
+
+	it("edit with UI + invalid JSON + confirm-false leaves the file unchanged", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => false }) }));
+		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("d");
+	});
+
+	it("edit with UI + invalid JSON + confirm-true saves the invalid content", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => true }) }));
+		expect(readFileSync(join(dir, "p.json"), "utf-8")).toBe("{not json");
+	});
+
+	it("delete requires confirmation (no UI → notify, file remains)", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("delete p", makeCtx());
+		expect(existsSync(join(dir, "p.json"))).toBe(true);
+	});
+
+	it("delete with UI + confirm-false keeps the file", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => false }) }));
+		expect(existsSync(join(dir, "p.json"))).toBe(true);
+	});
+
+	it("delete with UI + confirm-true removes the file", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		expect(existsSync(join(dir, "p.json"))).toBe(false);
+	});
+
+	it("rm alias dispatches to delete", async () => {
+		writeProfile("p", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("rm p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		expect(existsSync(join(dir, "p.json"))).toBe(false);
+	});
+
+	it("delete removes a matching sibling prompt dir when confirmed", async () => {
+		writeProfile("p", { description: "d", system_prompt: "./p/sp.md" });
+		mkdirSync(join(dir, "p"));
+		writeFileSync(join(dir, "p", "sp.md"), "prompt");
+		const { command } = setupCommand();
+		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		expect(existsSync(join(dir, "p.json"))).toBe(false);
+		expect(existsSync(join(dir, "p"))).toBe(false);
 	});
 
 	it("rename moves the file and a matching sibling prompt dir", async () => {
-		writeFileSync(join(dir, "old.json"), '{"description":"d"}');
+		writeProfile("old", { description: "d" });
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
-		const { pi } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("rename old new", makeCtx());
+		const { command } = setupCommand();
+		await command()!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "new.json"))).toBe(true);
 		expect(existsSync(join(dir, "old.json"))).toBe(false);
 		expect(existsSync(join(dir, "new", "system-prompt.md"))).toBe(true);
@@ -283,33 +499,73 @@ describe("/profiles command", () => {
 	});
 
 	it("rename rolls back the profile when the sibling move fails and target did not exist", async () => {
-		writeFileSync(join(dir, "old.json"), '{"description":"d"}');
+		writeProfile("old", { description: "d" });
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
-		// Block the dir move by creating a file at the target dir path.
-		writeFileSync(join(dir, "new"), "blocker");
-		const { pi } = makePi();
-		let registered: { handler: (a: string, ctx: unknown) => Promise<void> } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		await registered!.handler("rename old new", makeCtx());
-		// Profile rolled back, blocker untouched
+		writeFileSync(join(dir, "new"), "blocker"); // makes toDir a file → dir rename fails
+		const { command } = setupCommand();
+		await command()!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "old.json"))).toBe(true);
 		expect(existsSync(join(dir, "new.json"))).toBe(false);
 	});
 
-	it("getArgumentCompletions completes names for show but returns null for rename target", async () => {
-		writeFileSync(join(dir, "planner.json"), '{"description":"d"}');
-		writeFileSync(join(dir, "coder.json"), "{}");
-		const { pi } = makePi();
-		let registered: { getArgumentCompletions: (p: string) => unknown } | undefined;
-		(pi as any).registerCommand = (_n: string, o: any) => { registered = o; };
-		factory(pi);
-		const show = registered!.getArgumentCompletions("show p") as { value: string }[];
-		expect(show.map((c) => c.value)).toEqual(["planner"]);
-		const renameSrc = registered!.getArgumentCompletions("rename p") as { value: string }[];
-		expect(renameSrc.map((c) => c.value)).toEqual(["planner"]);
-		// second arg (target) must not complete existing names
-		expect(registered!.getArgumentCompletions("rename planner ")).toBe(null);
+	it("rename aborts when both source and target prompt dirs exist", async () => {
+		writeProfile("old", { description: "d" });
+		mkdirSync(join(dir, "old"));
+		mkdirSync(join(dir, "new"));
+		const { command } = setupCommand();
+		await command()!.handler("rename old new", makeCtx());
+		expect(existsSync(join(dir, "old.json"))).toBe(true);
+		expect(existsSync(join(dir, "old"))).toBe(true);
+		expect(existsSync(join(dir, "new"))).toBe(true);
+	});
+
+	it("mv alias dispatches to rename (file-only happy path)", async () => {
+		writeProfile("a", { description: "d" });
+		const { command } = setupCommand();
+		await command()!.handler("mv a b", makeCtx());
+		expect(existsSync(join(dir, "b.json"))).toBe(true);
+		expect(existsSync(join(dir, "a.json"))).toBe(false);
+	});
+
+	it("bogus subcommand notifies usage without crashing", async () => {
+		const { command } = setupCommand();
+		await command()!.handler("bogus", makeCtx());
+	});
+
+	it("getArgumentCompletions completes subcommands when no space typed", async () => {
+		const { command } = setupCommand();
+		const r = command()!.getArgumentCompletions("sh") as { value: string }[];
+		expect(r.map((c) => c.value).sort()).toEqual(["show"]);
+		const all = command()!.getArgumentCompletions("") as { value: string }[];
+		expect(all.map((c) => c.value)).toEqual(
+			expect.arrayContaining(["list", "show", "new", "edit", "delete", "rename", "ls", "cat", "create", "rm", "remove", "mv"])
+		);
+	});
+
+	it("getArgumentCompletions completes profile names for show", async () => {
+		writeProfile("planner", { description: "d" });
+		writeProfile("coder", {});
+		const { command } = setupCommand();
+		const r = command()!.getArgumentCompletions("show p") as { value: string }[];
+		expect(r.map((c) => c.value)).toEqual(["planner"]);
+	});
+
+	it("getArgumentCompletions returns null for rename target (second arg)", async () => {
+		writeProfile("planner", { description: "d" });
+		const { command } = setupCommand();
+		expect(command()!.getArgumentCompletions("rename planner ")).toBe(null);
+	});
+
+	it("getArgumentCompletions completes source for rename", async () => {
+		writeProfile("planner", { description: "d" });
+		const { command } = setupCommand();
+		const r = command()!.getArgumentCompletions("rename p") as { value: string }[];
+		expect(r.map((c) => c.value)).toEqual(["planner"]);
+	});
+
+	it("getArgumentCompletions returns null for unknown sub", async () => {
+		const { command } = setupCommand();
+		expect(command()!.getArgumentCompletions("foo x")).toBe(null);
 	});
 });

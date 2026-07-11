@@ -10,14 +10,18 @@
  * its default for that setting.
  *
  * Profile fields:
- *   - description:   short human/agent-readable purpose (shown by /profiles)
- *   - provider:      provider id (anthropic, openai, ...)
- *   - model:         model id (requires provider)
- *   - thinking:      off / minimal / low / medium / high / xhigh / max
- *   - tools:         tool allowlist as an array of strings
- *   - system_prompt: inline string OR a file path (relative to the profile
- *                    JSON's directory, or absolute / ~/). If the string is
- *                    not a readable file path it is treated as inline text.
+ *   - description:            short human/agent-readable purpose (shown by /profiles)
+ *   - provider:               provider id (anthropic, openai, ...)
+ *   - model:                   model id (requires provider)
+ *   - thinking:               off / minimal / low / medium / high / xhigh / max
+ *   - tools:                   tool allowlist as an array of strings
+ *   - system_prompt:          inline string OR a file path (relative to the profile
+ *                             JSON's directory, or absolute / ~/). If the string is
+ *                             not a readable file path it is treated as inline text.
+ *   - replace_system_prompt:  boolean. Default false — the profile prompt is
+ *                             APPENDED to pi's built-in system prompt (preserving
+ *                             tool guidance and project context). Set true to
+ *                             replace the built-in prompt entirely.
  *
  * Install:
  *   pi install npm:pi-agent-profiles
@@ -58,6 +62,16 @@ const THINKING_LEVELS = new Set([
 	"max",
 ]);
 
+const KNOWN_FIELDS = new Set([
+	"description",
+	"provider",
+	"model",
+	"thinking",
+	"tools",
+	"system_prompt",
+	"replace_system_prompt",
+]);
+
 export interface Profile {
 	description?: string;
 	provider?: string;
@@ -65,15 +79,16 @@ export interface Profile {
 	thinking?: string;
 	tools?: string[];
 	system_prompt?: string;
+	replace_system_prompt?: boolean;
 }
 
 export type ParseProfileResult =
-	| { ok: true; profile: Profile }
+	| { ok: true; profile: Profile; warnings: string[] }
 	| { ok: false; error: string };
 
 function expandTilde(p: string): string {
 	if (p.startsWith("~/")) {
-		return (typeof os !== "undefined" ? os.homedir() : "") + p.slice(1);
+		return os.homedir() + p.slice(1);
 	}
 	return p;
 }
@@ -81,7 +96,7 @@ function expandTilde(p: string): string {
 function profilesDir(): string {
 	return expandTilde(
 		(typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||
-		DEFAULT_PROFILES_DIR
+			DEFAULT_PROFILES_DIR
 	);
 }
 
@@ -113,9 +128,10 @@ export function parseProfileFile(content: string, file: string): ParseProfileRes
 	}
 
 	const p = parsed as Record<string, unknown>;
+	const warnings: string[] = [];
 
 	const stringField = (key: string): string | undefined => {
-		if (key in p && p[key] !== undefined && typeof p[key] !== "string") {
+		if (key in p && p[key] !== undefined && p[key] !== null && typeof p[key] !== "string") {
 			return key + " must be a string in " + file;
 		}
 		return undefined;
@@ -130,7 +146,13 @@ export function parseProfileFile(content: string, file: string): ParseProfileRes
 	const spErr = stringField("system_prompt");
 	if (spErr) return { ok: false, error: spErr };
 
-	if ("thinking" in p && p.thinking !== undefined) {
+	if ("replace_system_prompt" in p && p.replace_system_prompt !== undefined && p.replace_system_prompt !== null) {
+		if (typeof p.replace_system_prompt !== "boolean") {
+			return { ok: false, error: "replace_system_prompt must be a boolean in " + file };
+		}
+	}
+
+	if ("thinking" in p && p.thinking !== undefined && p.thinking !== null) {
 		if (typeof p.thinking !== "string" || !THINKING_LEVELS.has(p.thinking)) {
 			return {
 				ok: false,
@@ -139,31 +161,38 @@ export function parseProfileFile(content: string, file: string): ParseProfileRes
 		}
 	}
 
-	if ("tools" in p && p.tools !== undefined) {
+	if ("tools" in p && p.tools !== undefined && p.tools !== null) {
 		if (!Array.isArray(p.tools) || p.tools.some((t) => typeof t !== "string")) {
 			return { ok: false, error: "tools must be an array of strings in " + file };
 		}
 	}
 
-	return { ok: true, profile: p as Profile };
+	for (const key of Object.keys(p)) {
+		if (!KNOWN_FIELDS.has(key)) {
+			warnings.push("unknown field \"" + key + "\" in " + file + " (ignored)");
+		}
+	}
+
+	return { ok: true, profile: p as Profile, warnings };
 }
 
-function readProfile(name: string): Profile | undefined {
-	const file = profilePath(name);
+export type ReadProfileResult =
+	| { ok: true; profile: Profile; warnings: string[] }
+	| { ok: false; reason: "missing" | "invalid"; error: string };
 
+function readProfile(name: string): ReadProfileResult {
+	const file = profilePath(name);
 	let content: string;
 	try {
 		content = readFileSync(file, "utf-8");
 	} catch {
-		return undefined;
+		return { ok: false, reason: "missing", error: "No profile found for \"" + name + "\" in " + profilesDir() };
 	}
-
 	const result = parseProfileFile(content, file);
 	if (!result.ok) {
-		console.warn("[pi-agent-profiles] " + result.error);
-		return undefined;
+		return { ok: false, reason: "invalid", error: result.error };
 	}
-	return result.profile;
+	return { ok: true, profile: result.profile, warnings: result.warnings };
 }
 
 function readProfileRaw(name: string): { ok: true; content: string } | { ok: false; error: string } {
@@ -193,8 +222,12 @@ function listProfiles(): ProfileSummary[] {
 	for (const entry of entries) {
 		if (!entry.endsWith(".json")) continue;
 		const name = entry.slice(0, -".json".length);
-		const profile = readProfile(name);
-		summaries.push({ name, description: profile?.description });
+		// Read silently — list/autocomplete must not spam warnings on every
+		// malformed file. Skip files that are missing or invalid.
+		const result = readProfile(name);
+		if (result.ok) {
+			summaries.push({ name, description: result.profile.description });
+		}
 	}
 	summaries.sort((a, b) => a.name.localeCompare(b.name));
 	return summaries;
@@ -205,12 +238,9 @@ export function resolveSystemPrompt(value: unknown, baseDir: string): string | u
 
 	// Try as a file path first. Relative paths resolve against the profile
 	// JSON's directory (baseDir); absolute and ~/ paths resolve as-is.
-	let resolved: string;
-	if (value.startsWith("/") || value.startsWith("~")) {
-		resolved = expandTilde(value);
-	} else {
-		resolved = baseDir + "/" + value;
-	}
+	const resolved = value.startsWith("/") || value.startsWith("~")
+		? expandTilde(value)
+		: path.join(baseDir, value);
 	try {
 		return readFileSync(resolved, "utf-8").trim();
 	} catch {
@@ -236,11 +266,31 @@ function defaultScaffold(description: string): string {
 	);
 }
 
+let atomicCounter = 0;
 function atomicWrite(file: string, content: string): void {
-	const tmp = file + ".tmp-" + process.pid;
-	writeFileSync(tmp, content, "utf-8");
-	renameSync(tmp, file);
+	atomicCounter++;
+	const tmp = file + ".tmp-" + process.pid + "-" + atomicCounter;
+	try {
+		writeFileSync(tmp, content, "utf-8");
+		renameSync(tmp, file);
+	} catch (err) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// best-effort cleanup
+		}
+		throw err;
+	}
 }
+
+const SUBCOMMANDS = ["list", "show", "new", "edit", "delete", "rename"];
+const SUBCOMMAND_ALIASES: Record<string, string[]> = {
+	list: ["ls"],
+	show: ["cat"],
+	new: ["create"],
+	delete: ["rm", "remove"],
+	rename: ["mv"],
+};
 
 export default function (pi: ExtensionAPI) {
 	// Register the --profile CLI flag
@@ -249,87 +299,113 @@ export default function (pi: ExtensionAPI) {
 		description: "Agent profile name (loads ~/.pi/agent-profiles/<name>.json)",
 	});
 
+	// Session-level config (model/thinking/tools) is applied once per session
+	// so mid-session user changes (e.g. /model) are not reverted every turn.
+	// The system prompt is per-turn and applied every turn.
+	let sessionConfigApplied = false;
+	let profileIssueWarned = false;
+
 	// Apply the profile before the agent starts
-	pi.on("before_agent_start", async (_event, ctx) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		const flag = pi.getFlag("profile");
 		if (!flag) return;
 
 		const profileName = typeof flag === "string" ? flag : String(flag);
 		if (!isValidProfileName(profileName)) {
-			console.warn(
-				"[pi-agent-profiles] Invalid profile name: \"" + profileName + "\""
-			);
+			if (!profileIssueWarned) {
+				console.warn("[pi-agent-profiles] Invalid profile name: \"" + profileName + "\"");
+				profileIssueWarned = true;
+			}
 			return;
 		}
 
 		const dir = profilesDir();
-		const profile = readProfile(profileName);
+		const result = readProfile(profileName);
 
-		if (!profile) {
-			console.warn(
-				"[pi-agent-profiles] No profile found for \"" + profileName + "\" in " + dir
-			);
+		if (!result.ok) {
+			if (!profileIssueWarned) {
+				console.warn("[pi-agent-profiles] " + result.error);
+				profileIssueWarned = true;
+			}
 			return;
 		}
 
-		// Apply model + provider. setModel takes a Model resolved from the
-		// registry, not a provider/modelId pair.
-		const provider = profile.provider;
-		const modelId = profile.model;
-		if (provider && modelId && ctx.modelRegistry) {
-			const model = ctx.modelRegistry.find(provider, modelId);
-			if (model) {
+		const profile = result.profile;
+
+		// Warn once on unknown fields (typos) so users notice silent misconfig.
+		if (!sessionConfigApplied && result.warnings.length > 0) {
+			for (const w of result.warnings) {
+				console.warn("[pi-agent-profiles] " + w);
+			}
+		}
+
+		// Apply session-level config once.
+		if (!sessionConfigApplied) {
+			sessionConfigApplied = true;
+
+			// Model + provider. setModel takes a Model resolved from the registry,
+			// not a provider/modelId pair. Require both provider and model.
+			const provider = profile.provider;
+			const modelId = profile.model;
+			if ((provider && !modelId) || (modelId && !provider)) {
+				console.warn(
+					"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
+				);
+			} else if (provider && modelId && ctx.modelRegistry) {
+				const model = ctx.modelRegistry.find(provider, modelId);
+				if (model) {
+					try {
+						const ok = await pi.setModel(model);
+						if (!ok) {
+							console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
+						}
+					} catch (err) {
+						console.warn("[pi-agent-profiles] Failed to set model: " + err);
+					}
+				} else {
+					console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
+				}
+			}
+
+			// Thinking level
+			const thinking = profile.thinking;
+			if (thinking) {
 				try {
-					const ok = await pi.setModel(model);
-					if (!ok) {
+					pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+				} catch (err) {
+					console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
+				}
+			}
+
+			// Tools. Filter to known tools (ghost entries silently no-op in pi
+			// but mask misconfigurations), dedup, and warn on unknown names.
+			const tools = profile.tools;
+			if (tools) {
+				try {
+					const known = new Set(pi.getAllTools().map((t) => t.name));
+					const knownTools = tools.filter((t) => known.has(t));
+					const unknown = tools.filter((t) => !known.has(t));
+					if (unknown.length > 0) {
 						console.warn(
-							"[pi-agent-profiles] No API key for " + provider + "/" + modelId
+							"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
 						);
 					}
+					pi.setActiveTools([...new Set(knownTools)]);
 				} catch (err) {
-					console.warn("[pi-agent-profiles] Failed to set model: " + err);
+					console.warn("[pi-agent-profiles] Failed to set tools: " + err);
 				}
-			} else {
-				console.warn(
-					"[pi-agent-profiles] Model not found: " + provider + "/" + modelId
-				);
 			}
 		}
 
-		// Apply thinking level
-		const thinking = profile.thinking;
-		if (thinking) {
-			try {
-				pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
-			} catch (err) {
-				console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
-			}
-		}
-
-		// Apply tools. Warn about names not in the active tool set.
-		const tools = profile.tools;
-		if (tools) {
-			try {
-				const known = new Set(pi.getAllTools().map((t) => t.name));
-				const unknown = tools.filter((t) => !known.has(t));
-				if (unknown.length > 0) {
-					console.warn(
-						"[pi-agent-profiles] Unknown tool(s) in profile, they will be unavailable: " +
-							unknown.join(", ")
-					);
-				}
-				pi.setActiveTools(tools);
-			} catch (err) {
-				console.warn("[pi-agent-profiles] Failed to set tools: " + err);
-			}
-		}
-
-		// Apply system prompt. Relative paths resolve against the profile
-		// JSON's directory (dir), not a per-profile subdirectory.
+		// System prompt — applied every turn. By default the profile prompt is
+		// appended to pi's built-in system prompt so tool guidance and project
+		// context survive. replace_system_prompt: true swaps it entirely.
 		const systemPrompt = resolveSystemPrompt(profile.system_prompt, dir);
-
 		if (systemPrompt) {
-			return { systemPrompt };
+			if (profile.replace_system_prompt) {
+				return { systemPrompt };
+			}
+			return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
 		}
 	});
 
@@ -339,8 +415,20 @@ export default function (pi: ExtensionAPI) {
 			"Manage agent profiles: list, show, new, edit, delete, rename (usage: /profiles [list|show|new|edit|delete|rename] [name])",
 		getArgumentCompletions(argPrefix) {
 			const parts = argPrefix.split(/\s+/);
-			if (parts.length < 2) return null;
+
+			// No subcommand typed yet → complete subcommand names (and aliases).
+			if (parts.length < 2) {
+				const prefix = parts[0] ?? "";
+				const all = [...SUBCOMMANDS, ...Object.values(SUBCOMMAND_ALIASES).flat()];
+				return all
+					.filter((s) => s.startsWith(prefix))
+					.map((s) => ({ value: s, label: s, description: undefined }));
+			}
+
 			const sub = parts[0];
+			const canonical = SUBCOMMANDS.includes(sub) || Object.entries(SUBCOMMAND_ALIASES).some(([_, a]) => a.includes(sub));
+
+			if (!canonical) return null;
 
 			// rename/mv: complete only the source (first name arg), never the
 			// target — completing the target with existing names invites overwrite.
@@ -352,8 +440,7 @@ export default function (pi: ExtensionAPI) {
 					.map((p) => ({ value: p.name, label: p.name, description: p.description }));
 			}
 
-			const nameSubs = new Set(["show", "edit", "delete", "rm", "remove", "cat"]);
-			if (!nameSubs.has(sub)) return null;
+			// show/edit/delete + aliases take a single name arg.
 			if (parts.length !== 2) return null;
 			const typed = parts[1];
 			return listProfiles()
@@ -603,16 +690,16 @@ export default function (pi: ExtensionAPI) {
 			if (!overwrite) return;
 		}
 
-		// Preflight the sibling prompt directory move so we can roll back the
-		// profile rename if the directory move would fail.
+		// Preflight the sibling prompt directory. If a sibling source dir exists
+		// AND a target dir already exists, we cannot move it (would need to merge)
+		// and leaving the source dir orphaned would break the renamed profile's
+		// system_prompt path. Abort the whole rename in that case.
 		const fromDir = path.join(profilesDir(), from);
 		const toDir = path.join(profilesDir(), to);
 		const hasSib = existsSync(fromDir) && statSync(fromDir).isDirectory();
-		const sibBlocked = hasSib && existsSync(toDir);
-
-		if (sibBlocked && !toExisted) {
+		if (hasSib && existsSync(toDir)) {
 			ctx.ui.notify(
-				"[pi-agent-profiles] target directory exists: " + to + "/ — rename aborted",
+				"[pi-agent-profiles] target directory exists: " + to + "/ — rename aborted (cannot merge directories)",
 				"warning"
 			);
 			return;
@@ -625,7 +712,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (hasSib && !existsSync(toDir)) {
+		if (hasSib) {
 			try {
 				renameSync(fromDir, toDir);
 			} catch (err) {

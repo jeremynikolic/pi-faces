@@ -13,24 +13,22 @@
  *   - description:   short human/agent-readable purpose (shown by /profiles)
  *   - provider:      provider id (anthropic, openai, ...)
  *   - model:         model id (requires provider)
- *   - thinking:      off / minimal / low / medium / high / xhigh
+ *   - thinking:      off / minimal / low / medium / high / xhigh / max
  *   - tools:         tool allowlist as an array of strings
  *   - system_prompt: inline string OR a file path (relative to the profile
- *                    JSON, or absolute / ~/). If the string is not a readable
- *                    file path it is treated as inline prompt text.
+ *                    JSON's directory, or absolute / ~/). If the string is
+ *                    not a readable file path it is treated as inline text.
  *
  * Install:
  *   pi install npm:pi-agent-profiles
  *
  * Usage:
  *   pi --profile planner -p "design the caching layer"
- *   pi --profile coder -p "implement the auth module"
  *   /profiles list
  *   /profiles edit planner
  *
  * Profile files:
  *   ~/.pi/agent-profiles/planner.json
- *   ~/.pi/agent-profiles/coder.json
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -48,9 +46,30 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-const PROFILES_DIR =
-	(typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||
-	"~/.pi/agent-profiles";
+const DEFAULT_PROFILES_DIR = "~/.pi/agent-profiles";
+
+const THINKING_LEVELS = new Set([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+
+export interface Profile {
+	description?: string;
+	provider?: string;
+	model?: string;
+	thinking?: string;
+	tools?: string[];
+	system_prompt?: string;
+}
+
+export type ParseProfileResult =
+	| { ok: true; profile: Profile }
+	| { ok: false; error: string };
 
 function expandTilde(p: string): string {
 	if (p.startsWith("~/")) {
@@ -60,14 +79,76 @@ function expandTilde(p: string): string {
 }
 
 function profilesDir(): string {
-	return expandTilde(PROFILES_DIR);
+	return expandTilde(
+		(typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||
+		DEFAULT_PROFILES_DIR
+	);
 }
 
 function profilePath(name: string): string {
 	return path.join(profilesDir(), name + ".json");
 }
 
-function readProfile(name: string): Record<string, unknown> | undefined {
+export function isValidProfileName(name: string | undefined): name is string {
+	return (
+		typeof name === "string" &&
+		name.length > 0 &&
+		!name.includes("/") &&
+		!name.includes("\\") &&
+		name !== "." &&
+		name !== ".."
+	);
+}
+
+export function parseProfileFile(content: string, file: string): ParseProfileResult {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(content);
+	} catch (err) {
+		return { ok: false, error: "Invalid JSON in " + file + ": " + err };
+	}
+
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { ok: false, error: "Profile must be a JSON object in " + file };
+	}
+
+	const p = parsed as Record<string, unknown>;
+
+	const stringField = (key: string): string | undefined => {
+		if (key in p && p[key] !== undefined && typeof p[key] !== "string") {
+			return key + " must be a string in " + file;
+		}
+		return undefined;
+	};
+
+	const descErr = stringField("description");
+	if (descErr) return { ok: false, error: descErr };
+	const provErr = stringField("provider");
+	if (provErr) return { ok: false, error: provErr };
+	const modelErr = stringField("model");
+	if (modelErr) return { ok: false, error: modelErr };
+	const spErr = stringField("system_prompt");
+	if (spErr) return { ok: false, error: spErr };
+
+	if ("thinking" in p && p.thinking !== undefined) {
+		if (typeof p.thinking !== "string" || !THINKING_LEVELS.has(p.thinking)) {
+			return {
+				ok: false,
+				error: "thinking must be one of " + [...THINKING_LEVELS].join(", ") + " in " + file,
+			};
+		}
+	}
+
+	if ("tools" in p && p.tools !== undefined) {
+		if (!Array.isArray(p.tools) || p.tools.some((t) => typeof t !== "string")) {
+			return { ok: false, error: "tools must be an array of strings in " + file };
+		}
+	}
+
+	return { ok: true, profile: p as Profile };
+}
+
+function readProfile(name: string): Profile | undefined {
 	const file = profilePath(name);
 
 	let content: string;
@@ -77,12 +158,12 @@ function readProfile(name: string): Record<string, unknown> | undefined {
 		return undefined;
 	}
 
-	try {
-		return JSON.parse(content);
-	} catch (err) {
-		console.warn("[pi-agent-profiles] Invalid JSON in " + file + ": " + err);
+	const result = parseProfileFile(content, file);
+	if (!result.ok) {
+		console.warn("[pi-agent-profiles] " + result.error);
 		return undefined;
 	}
+	return result.profile;
 }
 
 function readProfileRaw(name: string): { ok: true; content: string } | { ok: false; error: string } {
@@ -112,44 +193,30 @@ function listProfiles(): ProfileSummary[] {
 	for (const entry of entries) {
 		if (!entry.endsWith(".json")) continue;
 		const name = entry.slice(0, -".json".length);
-		let description: string | undefined;
 		const profile = readProfile(name);
-		if (profile && typeof profile.description === "string") {
-			description = profile.description;
-		}
-		summaries.push({ name, description });
+		summaries.push({ name, description: profile?.description });
 	}
 	summaries.sort((a, b) => a.name.localeCompare(b.name));
 	return summaries;
 }
 
-function resolvePath(p: string, baseDir: string): string {
-	if (p.startsWith("/") || p.startsWith("~")) return expandTilde(p);
-	return baseDir + "/" + p;
-}
-
-function resolveSystemPrompt(value: unknown, baseDir: string): string | undefined {
+export function resolveSystemPrompt(value: unknown, baseDir: string): string | undefined {
 	if (typeof value !== "string" || !value) return undefined;
 
-	// Try as a file path first
-	const resolved = resolvePath(value, baseDir);
+	// Try as a file path first. Relative paths resolve against the profile
+	// JSON's directory (baseDir); absolute and ~/ paths resolve as-is.
+	let resolved: string;
+	if (value.startsWith("/") || value.startsWith("~")) {
+		resolved = expandTilde(value);
+	} else {
+		resolved = baseDir + "/" + value;
+	}
 	try {
 		return readFileSync(resolved, "utf-8").trim();
 	} catch {
 		// Not a file — treat as inline prompt text
 		return value.trim();
 	}
-}
-
-function isValidProfileName(name: string | undefined): name is string {
-	return (
-		typeof name === "string" &&
-		name.length > 0 &&
-		!name.includes("/") &&
-		!name.includes("\\") &&
-		name !== "." &&
-		name !== ".."
-	);
 }
 
 function defaultScaffold(description: string): string {
@@ -169,6 +236,12 @@ function defaultScaffold(description: string): string {
 	);
 }
 
+function atomicWrite(file: string, content: string): void {
+	const tmp = file + ".tmp-" + process.pid;
+	writeFileSync(tmp, content, "utf-8");
+	renameSync(tmp, file);
+}
+
 export default function (pi: ExtensionAPI) {
 	// Register the --profile CLI flag
 	pi.registerFlag("profile", {
@@ -182,15 +255,19 @@ export default function (pi: ExtensionAPI) {
 		if (!flag) return;
 
 		const profileName = typeof flag === "string" ? flag : String(flag);
+		if (!isValidProfileName(profileName)) {
+			console.warn(
+				"[pi-agent-profiles] Invalid profile name: \"" + profileName + "\""
+			);
+			return;
+		}
+
 		const dir = profilesDir();
 		const profile = readProfile(profileName);
 
 		if (!profile) {
 			console.warn(
-				"[pi-agent-profiles] No profile found for \"" +
-					profileName +
-					"\" in " +
-					dir
+				"[pi-agent-profiles] No profile found for \"" + profileName + "\" in " + dir
 			);
 			return;
 		}
@@ -200,7 +277,7 @@ export default function (pi: ExtensionAPI) {
 		const provider = profile.provider;
 		const modelId = profile.model;
 		if (provider && modelId && ctx.modelRegistry) {
-			const model = ctx.modelRegistry.find(String(provider), String(modelId));
+			const model = ctx.modelRegistry.find(provider, modelId);
 			if (model) {
 				try {
 					const ok = await pi.setModel(model);
@@ -223,29 +300,33 @@ export default function (pi: ExtensionAPI) {
 		const thinking = profile.thinking;
 		if (thinking) {
 			try {
-				pi.setThinkingLevel(
-					String(thinking) as Parameters<ExtensionAPI["setThinkingLevel"]>[0]
-				);
+				pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
 			} catch (err) {
 				console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
 			}
 		}
 
-		// Apply tools
+		// Apply tools. Warn about names not in the active tool set.
 		const tools = profile.tools;
-		if (Array.isArray(tools)) {
+		if (tools) {
 			try {
-				pi.setActiveTools(tools.map(String));
+				const known = new Set(pi.getAllTools().map((t) => t.name));
+				const unknown = tools.filter((t) => !known.has(t));
+				if (unknown.length > 0) {
+					console.warn(
+						"[pi-agent-profiles] Unknown tool(s) in profile, they will be unavailable: " +
+							unknown.join(", ")
+					);
+				}
+				pi.setActiveTools(tools);
 			} catch (err) {
 				console.warn("[pi-agent-profiles] Failed to set tools: " + err);
 			}
 		}
 
-		// Apply system prompt
-		const systemPrompt = resolveSystemPrompt(
-			profile.system_prompt,
-			dir + "/" + profileName
-		);
+		// Apply system prompt. Relative paths resolve against the profile
+		// JSON's directory (dir), not a per-profile subdirectory.
+		const systemPrompt = resolveSystemPrompt(profile.system_prompt, dir);
 
 		if (systemPrompt) {
 			return { systemPrompt };
@@ -260,19 +341,24 @@ export default function (pi: ExtensionAPI) {
 			const parts = argPrefix.split(/\s+/);
 			if (parts.length < 2) return null;
 			const sub = parts[0];
-			const typed = parts[parts.length - 1];
 
-			// Subcommands that complete a profile name (first or second name arg)
-			const nameSubs = new Set(["show", "edit", "delete", "rm", "rename", "mv"]);
+			// rename/mv: complete only the source (first name arg), never the
+			// target — completing the target with existing names invites overwrite.
+			if (sub === "rename" || sub === "mv") {
+				if (parts.length !== 2) return null;
+				const typed = parts[1];
+				return listProfiles()
+					.filter((p) => p.name.startsWith(typed))
+					.map((p) => ({ value: p.name, label: p.name, description: p.description }));
+			}
+
+			const nameSubs = new Set(["show", "edit", "delete", "rm", "remove", "cat"]);
 			if (!nameSubs.has(sub)) return null;
-
+			if (parts.length !== 2) return null;
+			const typed = parts[1];
 			return listProfiles()
 				.filter((p) => p.name.startsWith(typed))
-				.map((p) => ({
-					value: p.name,
-					label: p.name,
-					description: p.description,
-				}));
+				.map((p) => ({ value: p.name, label: p.name, description: p.description }));
 		},
 		async handler(args, ctx) {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -304,10 +390,7 @@ export default function (pi: ExtensionAPI) {
 					return cmdRename(parts[1], parts[2], ctx);
 				}
 				default: {
-					ctx.ui.notify(
-						"[pi-agent-profiles] Unknown subcommand: " + sub,
-						"warning"
-					);
+					ctx.ui.notify("[pi-agent-profiles] Unknown subcommand: " + sub, "warning");
 					ctx.ui.notify(
 						"Usage: /profiles [list|show <name>|new <name>|edit <name>|delete <name>|rename <old> <new>]",
 						"info"
@@ -383,8 +466,13 @@ export default function (pi: ExtensionAPI) {
 			description = (await ctx.ui.input("Description (short purpose):", "")) || "";
 		}
 
-		mkdirSync(profilesDir(), { recursive: true });
-		writeFileSync(file, defaultScaffold(description), "utf-8");
+		try {
+			mkdirSync(profilesDir(), { recursive: true });
+			atomicWrite(file, defaultScaffold(description));
+		} catch (err) {
+			ctx.ui.notify("[pi-agent-profiles] Failed to create profile: " + err, "error");
+			return;
+		}
 		ctx.ui.notify("[pi-agent-profiles] Created " + file, "info");
 
 		if (ctx.hasUI) {
@@ -429,7 +517,12 @@ export default function (pi: ExtensionAPI) {
 			);
 			if (!save) return;
 		}
-		writeFileSync(profilePath(name), edited, "utf-8");
+		try {
+			atomicWrite(profilePath(name), edited);
+		} catch (err) {
+			ctx.ui.notify("[pi-agent-profiles] Failed to save profile: " + err, "error");
+			return;
+		}
 		ctx.ui.notify("[pi-agent-profiles] Saved " + name, "info");
 	}
 
@@ -444,12 +537,20 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!ctx.hasUI) {
-			ctx.ui.notify("[pi-agent-profiles] delete requires confirmation; use an interactive session", "warning");
+			ctx.ui.notify(
+				"[pi-agent-profiles] delete requires confirmation; use an interactive session",
+				"warning"
+			);
 			return;
 		}
 		const ok = await ctx.ui.confirm("Delete " + name + "?", "Removes " + file);
 		if (!ok) return;
-		unlinkSync(file);
+		try {
+			unlinkSync(file);
+		} catch (err) {
+			ctx.ui.notify("[pi-agent-profiles] Failed to delete profile: " + err, "error");
+			return;
+		}
 
 		const sib = path.join(profilesDir(), name);
 		if (existsSync(sib) && statSync(sib).isDirectory()) {
@@ -460,10 +561,17 @@ export default function (pi: ExtensionAPI) {
 			if (removeDir) {
 				try {
 					rmSync(sib, { recursive: true, force: true });
-					ctx.ui.notify("[pi-agent-profiles] Removed " + name + "/ and " + name + ".json", "info");
+					ctx.ui.notify(
+						"[pi-agent-profiles] Removed " + name + "/ and " + name + ".json",
+						"info"
+					);
 					return;
 				} catch (err) {
-					ctx.ui.notify("[pi-agent-profiles] Failed to remove " + sib + ": " + err, "warning");
+					ctx.ui.notify(
+						"[pi-agent-profiles] Deleted " + name + ".json but failed to remove " + name + "/: " + err,
+						"warning"
+					);
+					return;
 				}
 			}
 		}
@@ -485,7 +593,8 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("[pi-agent-profiles] No profile: " + from, "warning");
 			return;
 		}
-		if (existsSync(toFile)) {
+		const toExisted = existsSync(toFile);
+		if (toExisted) {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("[pi-agent-profiles] target exists: " + to, "warning");
 				return;
@@ -493,23 +602,50 @@ export default function (pi: ExtensionAPI) {
 			const overwrite = await ctx.ui.confirm("Target exists", "Overwrite " + to + "?");
 			if (!overwrite) return;
 		}
-		renameSync(fromFile, toFile);
 
-		// Move a matching sibling prompt directory if present
+		// Preflight the sibling prompt directory move so we can roll back the
+		// profile rename if the directory move would fail.
 		const fromDir = path.join(profilesDir(), from);
 		const toDir = path.join(profilesDir(), to);
-		if (
-			existsSync(fromDir) &&
-			statSync(fromDir).isDirectory() &&
-			!existsSync(toDir)
-		) {
+		const hasSib = existsSync(fromDir) && statSync(fromDir).isDirectory();
+		const sibBlocked = hasSib && existsSync(toDir);
+
+		if (sibBlocked && !toExisted) {
+			ctx.ui.notify(
+				"[pi-agent-profiles] target directory exists: " + to + "/ — rename aborted",
+				"warning"
+			);
+			return;
+		}
+
+		try {
+			renameSync(fromFile, toFile);
+		} catch (err) {
+			ctx.ui.notify("[pi-agent-profiles] Failed to rename profile: " + err, "error");
+			return;
+		}
+
+		if (hasSib && !existsSync(toDir)) {
 			try {
 				renameSync(fromDir, toDir);
 			} catch (err) {
+				// Roll back the profile rename only if we did not just overwrite
+				// an existing target (otherwise rollback would clobber the old file).
+				if (!toExisted) {
+					try {
+						renameSync(toFile, fromFile);
+					} catch {
+						// best-effort rollback; report the split state below
+					}
+				}
 				ctx.ui.notify(
-					"[pi-agent-profiles] Renamed profile but could not move directory " + from + "/: " + err,
+					"[pi-agent-profiles] Renamed profile but could not move directory " +
+						from +
+						"/: " +
+						err,
 					"warning"
 				);
+				return;
 			}
 		}
 		ctx.ui.notify("[pi-agent-profiles] Renamed " + from + " → " + to, "info");

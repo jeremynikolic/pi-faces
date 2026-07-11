@@ -76,7 +76,7 @@ Use the `/profiles` command inside a pi session:
 | Delete a profile (with confirm) | `/profiles delete <name>` |
 | Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
 
-`/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles. `new`, `edit`, and `delete` use interactive dialogs and require an interactive session. Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
+`/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles. `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts); `edit` and `delete` use interactive dialogs and require an interactive session. `rename` requires an interactive session only when the target already exists (to confirm overwrite). Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
 
 ## Example Profiles
 

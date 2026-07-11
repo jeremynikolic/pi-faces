@@ -144,7 +144,7 @@ Use the `/profiles` command inside a pi session:
 | Delete a profile (with confirm) | `/profiles delete <name>` |
 | Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
 
-`/profiles list` and `/profiles show` print into the conversation, so an agent can read the available profiles and their purposes. `new`, `edit`, and `delete` use interactive dialogs and require an interactive session.
+`/profiles list` and `/profiles show` print into the conversation, so an agent can read the available profiles and their purposes. `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts); `edit` and `delete` use interactive dialogs and require an interactive session. `rename` requires an interactive session only when the target already exists (to confirm overwrite).
 
 Profiles are plain JSON files, so shell commands also work:
 
@@ -172,11 +172,13 @@ The extension hooks two pi APIs:
 2. `before_agent_start` event — reads the profile JSON and applies settings before the model processes any input
 3. `registerCommand("profiles", ...)` — registers the `/profiles` slash command for listing and managing profiles
 
-Settings are applied via pi's extension hostcalls:
-- `setModel(provider, modelId)` — changes the active provider and model
+Settings are applied via pi's extension hostcalls. The flag is read with `pi.getFlag("profile")` and each setting is applied through the `pi` API (not the event context):
+- `setModel(model)` — changes the active provider and model. The `Model` is resolved from `ctx.modelRegistry.find(provider, modelId)` (the profile supplies `provider` + `model`, not a `Model` object directly).
 - `setThinkingLevel(level)` — changes the thinking level
 - `setActiveTools(tools)` — restricts the tool allowlist
 - `before_agent_start` return `{ systemPrompt }` — replaces the system prompt
+
+Relative `system_prompt` paths resolve against the profile JSON's directory (`~/.pi/agent-profiles`), so `./<name>/system-prompt.md` reads `~/.pi/agent-profiles/<name>/system-prompt.md`.
 
 Pi's own config precedence still applies for anything the profile doesn't set (API keys, compaction config, etc.).
 

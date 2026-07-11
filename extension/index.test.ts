@@ -373,19 +373,6 @@ describe("/profiles command", () => {
 		expect(calls.sendMessage[0].content).toContain("No profiles found");
 	});
 
-	it("ls alias dispatches to list", async () => {
-		const { calls, command } = setupCommand();
-		await command("profiles")!.handler("ls", makeCtx());
-		expect(calls.sendMessage).toHaveLength(1);
-	});
-
-	it("show prints the profile JSON; cat alias does the same", async () => {
-		writeProfile("p", { description: "d" });
-		const { calls, command } = setupCommand();
-		await command("profiles")!.handler("cat p", makeCtx());
-		expect(calls.sendMessage[0].content).toContain('"description":"d"');
-	});
-
 	it("show with an invalid/missing name notifies and does not message", async () => {
 		const { calls, command } = setupCommand();
 		await command("profiles")!.handler("show ../x", makeCtx());
@@ -399,12 +386,6 @@ describe("/profiles command", () => {
 		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 		const scaffold = JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8"));
 		expect(scaffold.description).toBe("TODO: describe this profile's purpose");
-	});
-
-	it("create alias dispatches to new", async () => {
-		const { command } = setupCommand();
-		await command("profiles")!.handler("create demo", makeCtx());
-		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 	});
 
 	it("new bails non-interactively when the destination exists", async () => {
@@ -469,13 +450,6 @@ describe("/profiles command", () => {
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 	});
 
-	it("rm alias dispatches to delete", async () => {
-		writeProfile("p", { description: "d" });
-		const { command } = setupCommand();
-		await command("profiles")!.handler("rm p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
-		expect(existsSync(join(dir, "p.json"))).toBe(false);
-	});
-
 	it("delete removes a matching sibling prompt dir when confirmed", async () => {
 		writeProfile("p", { description: "d", system_prompt: "./p/sp.md" });
 		mkdirSync(join(dir, "p"));
@@ -520,14 +494,6 @@ describe("/profiles command", () => {
 		expect(existsSync(join(dir, "new"))).toBe(true);
 	});
 
-	it("mv alias dispatches to rename (file-only happy path)", async () => {
-		writeProfile("a", { description: "d" });
-		const { command } = setupCommand();
-		await command("profiles")!.handler("mv a b", makeCtx());
-		expect(existsSync(join(dir, "b.json"))).toBe(true);
-		expect(existsSync(join(dir, "a.json"))).toBe(false);
-	});
-
 	it("bogus subcommand notifies usage without crashing", async () => {
 		const { command } = setupCommand();
 		await command("profiles")!.handler("bogus", makeCtx());
@@ -539,7 +505,7 @@ describe("/profiles command", () => {
 		expect(r.map((c) => c.value).sort()).toEqual(["show"]);
 		const all = command("profiles")!.getArgumentCompletions("") as { value: string }[];
 		expect(all.map((c) => c.value)).toEqual(
-			expect.arrayContaining(["list", "show", "new", "edit", "delete", "rename", "ls", "cat", "create", "rm", "remove", "mv"])
+			expect.arrayContaining(["list", "show", "new", "edit", "delete", "rename"])
 		);
 	});
 
@@ -581,10 +547,4 @@ describe("argument completion keeps the subcommand (regression)", () => {
 		expect(r.map((c) => c.label)).toEqual(["brainy"]);
 	});
 
-	it("rm alias completion value keeps the alias", async () => {
-		writeProfile("brainy", { description: "d" });
-		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("rm b") as { value: string }[];
-		expect(r.map((c) => c.value)).toEqual(["rm brainy"]);
-	});
 });

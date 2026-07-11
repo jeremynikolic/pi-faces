@@ -92,7 +92,7 @@ cp profiles/*.json ~/.pi/agent-profiles/
 
 The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`. **Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely. Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
 
-See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls, aliases, and the inline-vs-file system prompt behavior.
+See `skills/pi-agent-profiles/SKILL.md` for the full reference, including pitfalls and the inline-vs-file system prompt behavior.
 
 ## License
 

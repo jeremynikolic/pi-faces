@@ -284,13 +284,6 @@ function atomicWrite(file: string, content: string): void {
 }
 
 const SUBCOMMANDS = ["list", "show", "new", "edit", "delete", "rename"];
-const SUBCOMMAND_ALIASES: Record<string, string[]> = {
-	list: ["ls"],
-	show: ["cat"],
-	new: ["create"],
-	delete: ["rm", "remove"],
-	rename: ["mv"],
-};
 
 export default function (pi: ExtensionAPI) {
 	// Register the --profile CLI flag
@@ -419,14 +412,14 @@ export default function (pi: ExtensionAPI) {
 			// No subcommand typed yet → complete subcommand names (and aliases).
 			if (parts.length < 2) {
 				const prefix = parts[0] ?? "";
-				const all = [...SUBCOMMANDS, ...Object.values(SUBCOMMAND_ALIASES).flat()];
+				const all = [...SUBCOMMANDS];
 				return all
 					.filter((s) => s.startsWith(prefix))
 					.map((s) => ({ value: s, label: s, description: undefined }));
 			}
 
 			const sub = parts[0];
-			const canonical = SUBCOMMANDS.includes(sub) || Object.entries(SUBCOMMAND_ALIASES).some(([_, a]) => a.includes(sub));
+			const canonical = SUBCOMMANDS.includes(sub);
 
 			if (!canonical) return null;
 
@@ -452,28 +445,22 @@ export default function (pi: ExtensionAPI) {
 			const sub = parts[0] || "list";
 
 			switch (sub) {
-				case "list":
-				case "ls": {
+				case "list": {
 					return cmdList(ctx);
 				}
-				case "show":
-				case "cat": {
+				case "show": {
 					return cmdShow(parts[1], ctx);
 				}
-				case "new":
-				case "create": {
+				case "new": {
 					return cmdNew(parts[1], ctx);
 				}
 				case "edit": {
 					return cmdEdit(parts[1], ctx);
 				}
-				case "delete":
-				case "rm":
-				case "remove": {
+				case "delete": {
 					return cmdDelete(parts[1], ctx);
 				}
-				case "rename":
-				case "mv": {
+				case "rename": {
 					return cmdRename(parts[1], parts[2], ctx);
 				}
 				default: {

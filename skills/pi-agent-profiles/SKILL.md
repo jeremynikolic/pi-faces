@@ -139,14 +139,14 @@ EOF
 
 Use the `/profiles` command inside a pi session:
 
-| Action | Command (aliases in parentheses) |
+| Action | Command |
 |---|---|
-| List profiles (name + description) | `/profiles` or `/profiles list` (`ls`) |
-| Show a profile's full JSON | `/profiles show <name>` (`cat`) |
-| Create a profile (scaffold + edit) | `/profiles new <name>` (`create`) |
+| List profiles (name + description) | `/profiles` or `/profiles list` |
+| Show a profile's full JSON | `/profiles show <name>` |
+| Create a profile (scaffold + edit) | `/profiles new <name>` |
 | Edit a profile in the editor | `/profiles edit <name>` |
-| Delete a profile (with confirm) | `/profiles delete <name>` (`rm`, `remove`) |
-| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` (`mv`) |
+| Delete a profile (with confirm) | `/profiles delete <name>` |
+| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` |
 
 Tab completion: after `/profiles ` you get subcommand names; after `show`/`edit`/`delete`/`rename` you get existing profile names (`rename` completes only the source, never the target).
 

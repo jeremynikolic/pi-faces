@@ -6,6 +6,16 @@
 
 Agent profiles for `pi` — bundle a short description, model, provider, thinking level, tools, and system prompt into a named JSON file, selected via `--profile <name>`. Managed with the `/profiles` slash command.
 
+## Features
+
+- **`--profile <name>` CLI flag**: Select a profile from the command line; flags pass through to `pi` as normal.
+- **`/profiles` slash command**: List, show, create, edit, delete, and rename profiles in-session.
+- **Bundled config**: Description, model, provider, thinking, tools, and system prompt in one JSON file.
+- **Per-session application**: Model, thinking, and tools applied once per session; system prompt applied every turn.
+- **Prompt modes**: Append to or replace pi's built-in system prompt (`replace_system_prompt`).
+- **Session name prefix**: Active profile tags the session name so sessions group in `/resume` and `pi -r`.
+- **Graceful defaults**: Omit any field and `pi` keeps its default; unknown fields and tool names are warned.
+
 ## Install
 
 ```bash

@@ -44,8 +44,8 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 ```json
 {
   "description": "Plans work before implementation: scopes tasks, identifies risks, and writes a plan.",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4",
+  "provider": "ollama-cloud",
+  "model": "glm-5.2",
   "thinking": "high",
   "tools": ["read", "bash", "grep"],
   "system_prompt": "You are a planning agent...",
@@ -56,7 +56,7 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 | Field | Effect | Optional |
 |---|---|---|
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
-| `provider` | Provider ID (anthropic, openai, etc.) | Yes |
+| `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
 | `model` | Model ID | Yes (requires provider) |
 | `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
 | `tools` | Tool allowlist as array of strings | Yes |

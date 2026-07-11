@@ -55,8 +55,8 @@ Write a JSON file per role, or use `/profiles new <name>` (see "Managing Profile
 ```json
 {
   "description": "Plans work before implementation: scopes tasks, identifies risks, and writes a plan.",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4",
+  "provider": "ollama-cloud",
+  "model": "glm-5.2",
   "thinking": "high",
   "tools": ["read", "bash", "grep", "find", "ls"],
   "system_prompt": "You are a planning agent. Your job is to...",
@@ -67,7 +67,7 @@ Write a JSON file per role, or use `/profiles new <name>` (see "Managing Profile
 | Field | Effect | Optional |
 |---|---|---|
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
-| `provider` | Provider ID (anthropic, openai, etc.) | Yes |
+| `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
 | `model` | Model ID | Yes (requires provider) |
 | `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
 | `tools` | Tool allowlist as array of strings | Yes |
@@ -111,8 +111,8 @@ mkdir -p ~/.pi/agent-profiles
 cat > ~/.pi/agent-profiles/<name>.json << 'EOF'
 {
   "description": "...",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4",
+  "provider": "ollama-cloud",
+  "model": "glm-5.2",
   "thinking": "high",
   "tools": ["read", "bash", "grep", "find", "ls"],
   "system_prompt": "You are a..."
@@ -127,8 +127,8 @@ mkdir -p ~/.pi/agent-profiles/<name>
 cat > ~/.pi/agent-profiles/<name>.json << 'EOF'
 {
   "description": "...",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4",
+  "provider": "ollama-cloud",
+  "model": "glm-5.2",
   "system_prompt": "./<name>/system-prompt.md"
 }
 EOF

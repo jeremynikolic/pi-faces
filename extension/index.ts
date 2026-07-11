@@ -11,7 +11,7 @@
  *
  * Profile fields:
  *   - description:            short human/agent-readable purpose (shown by /profiles)
- *   - provider:               provider id (anthropic, openai, ...)
+ *   - provider:               provider id (ollama-cloud, openai, ...)
  *   - model:                   model id (requires provider)
  *   - thinking:               off / minimal / low / medium / high / xhigh / max
  *   - tools:                   tool allowlist as an array of strings
@@ -254,8 +254,8 @@ function defaultScaffold(description: string): string {
 		JSON.stringify(
 			{
 				description: description || "TODO: describe this profile's purpose",
-				provider: "anthropic",
-				model: "claude-sonnet-4",
+				provider: "ollama-cloud",
+				model: "glm-5.2",
 				thinking: "high",
 				tools: ["read", "bash", "grep", "find", "ls"],
 				system_prompt: "You are a...",

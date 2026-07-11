@@ -9,134 +9,160 @@ import { isValidProfileName, readProfile, resolveSystemPrompt } from "./profile.
 import { cliFlagProvided } from "./cli.ts";
 
 /**
- * Applies the active profile in `before_agent_start`. Session-level config
- * (model, thinking, tools) is applied once per session so mid-session user
- * changes (e.g. /model) are not reverted every turn; the system prompt is
- * applied every turn. By default the profile prompt is appended to pi's
- * built-in system prompt — `replace_system_prompt: true` swaps it entirely.
+ * Applies the active profile.
+ *
+ * Session-level config (model, thinking, tools) is applied once in
+ * `session_start` so the agent shows the profile's model/thinking at
+ * startup (not pi's defaults). The system prompt is applied every turn
+ * in `before_agent_start`. By default the profile prompt is appended to
+ * pi's built-in system prompt; `replace_system_prompt: true` swaps it
+ * entirely.
+ *
+ * Profile fields are defaults — explicit CLI flags (--model/--provider,
+ * --thinking, --tools/-t) skip the corresponding profile field.
  */
 export class ProfileApplier {
-	private sessionConfigApplied = false;
 	private profileIssueWarned = false;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
-	async handleBeforeAgentStart(
-		event: BeforeAgentStartEvent,
-		ctx: ExtensionContext
-	): Promise<BeforeAgentStartEventResult | undefined> {
+	/** Resolve the profile name from the --profile flag, or undefined. */
+	private profileName(): string | undefined {
 		const flag = this.pi.getFlag("profile");
 		if (!flag) return undefined;
-
-		const profileName = typeof flag === "string" ? flag : String(flag);
-		if (!isValidProfileName(profileName)) {
+		const name = typeof flag === "string" ? flag : String(flag);
+		if (!isValidProfileName(name)) {
 			if (!this.profileIssueWarned) {
-				console.warn("[pi-agent-profiles] Invalid profile name: \"" + profileName + "\"");
+				console.warn("[pi-agent-profiles] Invalid profile name: \"" + name + "\"");
 				this.profileIssueWarned = true;
 			}
 			return undefined;
 		}
+		return name;
+	}
+
+	/** Apply model/thinking/tools once at session start. */
+	async handleSessionStart(_event: unknown, ctx: ExtensionContext): Promise<void> {
+		const profileName = this.profileName();
+		if (!profileName) return;
 
 		const dir = profilesDir();
 		const result = readProfile(profileName);
-
 		if (!result.ok) {
 			if (!this.profileIssueWarned) {
 				console.warn("[pi-agent-profiles] " + result.error);
 				this.profileIssueWarned = true;
 			}
-			return undefined;
+			return;
 		}
-
 		const profile = result.profile;
 
-		// Warn once on unknown fields (typos) so users notice silent misconfig.
-		if (!this.sessionConfigApplied && result.warnings.length > 0) {
-			for (const w of result.warnings) {
-				console.warn("[pi-agent-profiles] " + w);
+		// Warn once on unknown fields (typos).
+		for (const w of result.warnings) {
+			console.warn("[pi-agent-profiles] " + w);
+		}
+
+		// Model + provider. The `model` field accepts either a bare id
+		// ("glm-5.2", paired with `provider`) or a combined "provider/id"
+		// ("ollama-cloud/glm-5.2"), matching pi's --model convention. Skip if
+		// the user passed --model or --provider explicitly.
+		const { provider, modelId } = parseModelRef(profile.provider, profile.model);
+		const modelExplicit = cliFlagProvided("model") || cliFlagProvided("provider");
+		if (modelExplicit) {
+			// pi already applied the user's --model/--provider; leave it.
+		} else if ((provider && !modelId) || (modelId && !provider)) {
+			console.warn(
+				"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
+			);
+		} else if (provider && modelId && ctx.modelRegistry) {
+			const model = ctx.modelRegistry.find(provider, modelId);
+			if (model) {
+				try {
+					const ok = await this.pi.setModel(model);
+					if (!ok) {
+						console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
+					}
+				} catch (err) {
+					console.warn("[pi-agent-profiles] Failed to set model: " + err);
+				}
+			} else {
+				console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
 			}
 		}
 
-		// Apply session-level config once.
-		if (!this.sessionConfigApplied) {
-			this.sessionConfigApplied = true;
+		// Thinking level. Skip if the user passed --thinking explicitly.
+		const thinking = profile.thinking;
+		if (thinking && !cliFlagProvided("thinking")) {
+			try {
+				this.pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+			} catch (err) {
+				console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
+			}
+		}
 
-			// Model + provider. setModel takes a Model resolved from the registry,
-			// not a provider/modelId pair. Require both provider and model.
-			// Skip if the user passed --model or --provider explicitly so the
-			// profile acts as a default that CLI options override.
-			const provider = profile.provider;
-			const modelId = profile.model;
-			const modelExplicit = cliFlagProvided("model") || cliFlagProvided("provider");
-			if (modelExplicit) {
-				// pi already applied the user's --model/--provider; leave it.
-			} else if ((provider && !modelId) || (modelId && !provider)) {
-				console.warn(
-					"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
-				);
-			} else if (provider && modelId && ctx.modelRegistry) {
-				const model = ctx.modelRegistry.find(provider, modelId);
-				if (model) {
-					try {
-						const ok = await this.pi.setModel(model);
-						if (!ok) {
-							console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
-						}
-					} catch (err) {
-						console.warn("[pi-agent-profiles] Failed to set model: " + err);
-					}
+		// Tools. Filter to known tools, dedup, warn on unknown names. Skip if
+		// the user passed --tools/-t explicitly. Empty/absent tools = all tools.
+		const tools = profile.tools;
+		if (tools && tools.length > 0 && !cliFlagProvided("tools", "t")) {
+			try {
+				const known = new Set(this.pi.getAllTools().map((t) => t.name));
+				const knownTools = tools.filter((t) => known.has(t));
+				const unknown = tools.filter((t) => !known.has(t));
+				if (unknown.length > 0) {
+					console.warn(
+						"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
+					);
+				}
+				// Guard against disabling every tool: if the profile listed only
+				// unknown tools, leave the active tool set unchanged.
+				if (knownTools.length === 0) {
+					console.warn("[pi-agent-profiles] No known tools in profile; tool set unchanged");
 				} else {
-					console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
+					this.pi.setActiveTools([...new Set(knownTools)]);
 				}
-			}
-
-			// Thinking level. Skip if the user passed --thinking explicitly.
-			const thinking = profile.thinking;
-			if (thinking && !cliFlagProvided("thinking")) {
-				try {
-					this.pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
-				} catch (err) {
-					console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
-				}
-			}
-
-			// Tools. Filter to known tools (ghost entries silently no-op in pi
-			// but mask misconfigurations), dedup, and warn on unknown names.
-			// Skip if the user passed --tools/-t explicitly.
-			const tools = profile.tools;
-			if (tools && tools.length > 0 && !cliFlagProvided("tools", "t")) {
-				try {
-					const known = new Set(this.pi.getAllTools().map((t) => t.name));
-					const knownTools = tools.filter((t) => known.has(t));
-					const unknown = tools.filter((t) => !known.has(t));
-					if (unknown.length > 0) {
-						console.warn(
-							"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
-						);
-					}
-					// Guard against disabling every tool: if the profile listed only
-					// unknown tools, leave the active tool set unchanged.
-					if (knownTools.length === 0) {
-						console.warn("[pi-agent-profiles] No known tools in profile; tool set unchanged");
-					} else {
-						this.pi.setActiveTools([...new Set(knownTools)]);
-					}
-				} catch (err) {
-					console.warn("[pi-agent-profiles] Failed to set tools: " + err);
-				}
+			} catch (err) {
+				console.warn("[pi-agent-profiles] Failed to set tools: " + err);
 			}
 		}
-
-		// System prompt — applied every turn. By default the profile prompt is
-		// appended to pi's built-in system prompt so tool guidance and project
-		// context survive. replace_system_prompt: true swaps it entirely.
-		const systemPrompt = resolveSystemPrompt(profile.system_prompt, dir);
-		if (systemPrompt) {
-			if (profile.replace_system_prompt) {
-				return { systemPrompt };
-			}
-			return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
-		}
-		return undefined;
 	}
+
+	/** Apply the system prompt every turn. */
+	async handleBeforeAgentStart(
+		event: BeforeAgentStartEvent,
+		_ctx: ExtensionContext
+	): Promise<BeforeAgentStartEventResult | undefined> {
+		const profileName = this.profileName();
+		if (!profileName) return undefined;
+
+		const dir = profilesDir();
+		const result = readProfile(profileName);
+		if (!result.ok) {
+			// Already warned in session_start; stay quiet on later turns.
+			return undefined;
+		}
+		const profile = result.profile;
+
+		const systemPrompt = resolveSystemPrompt(profile.system_prompt, dir);
+		if (!systemPrompt) return undefined;
+		if (profile.replace_system_prompt) {
+			return { systemPrompt };
+		}
+		return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
+	}
+}
+
+/**
+ * Resolve a provider/modelId pair from the profile fields. The `model`
+ * field may be a bare id (use the separate `provider`) or a combined
+ * "provider/id" (split it; the separate `provider` is ignored in that case).
+ */
+export function parseModelRef(
+	provider: string | undefined,
+	model: string | undefined
+): { provider: string | undefined; modelId: string | undefined } {
+	if (typeof model === "string" && model.includes("/")) {
+		const slash = model.indexOf("/");
+		return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
+	}
+	return { provider, modelId: model };
 }

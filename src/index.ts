@@ -10,6 +10,7 @@ import { registerProfilesCommand } from "./commands.ts";
 export { resolveSystemPrompt, isValidProfileName, parseProfileFile } from "./profile.ts";
 export { parseConfigFile } from "./config.ts";
 export { hasProfilePrefix, withProfilePrefix } from "./prefix.ts";
+export { parseModelRef } from "./apply.ts";
 export type { Profile, PackageConfig } from "./types.ts";
 
 /**
@@ -35,9 +36,11 @@ export default function (pi: ExtensionAPI) {
 		description: "Agent profile name (loads ~/.pi/agent-profiles/<name>.json)",
 	});
 
-	// Apply the profile before the agent starts (model/thinking/tools once per
-	// session; system prompt every turn).
+	// Apply the profile: model/thinking/tools once at session start (so the
+	// agent shows the profile's model/thinking at startup, not pi defaults);
+	// system prompt every turn.
 	const applier = new ProfileApplier(pi);
+	pi.on("session_start", (event, ctx) => applier.handleSessionStart(event, ctx));
 	pi.on("before_agent_start", (event, ctx) => applier.handleBeforeAgentStart(event, ctx));
 
 	// Prefix the session display name with [profile] while a profile is active.

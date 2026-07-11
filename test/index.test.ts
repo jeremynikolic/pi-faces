@@ -17,6 +17,7 @@ import factory, {
 	parseConfigFile,
 	hasProfilePrefix,
 	withProfilePrefix,
+	parseModelRef,
 	type Profile,
 	type PackageConfig,
 } from "../src/index.ts";
@@ -154,6 +155,22 @@ function event(sp?: string): BeforeAgentStartEvent {
 		prompt: "",
 		systemPrompt: sp ?? "BUILT-IN",
 	} as BeforeAgentStartEvent;
+}
+function sessionStartEvent() {
+	return { type: "session_start" } as unknown as BeforeAgentStartEvent;
+}
+
+/** Run the applier's session_start handler (model/thinking/tools). */
+async function runApplySessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
+	const h = handlers.get("session_start")?.[0];
+	if (h) await h(sessionStartEvent(), ctx);
+}
+
+/** Run ALL session_start handlers the way pi does (applier + prefix). */
+async function runSessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
+	for (const h of handlers.get("session_start") ?? []) {
+		await h(sessionStartEvent(), ctx);
+	}
 }
 
 function makeCalls(): PiCalls {
@@ -319,6 +336,9 @@ describe("before_agent_start", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
+		// model/thinking/tools apply once at session start
+		await runApplySessionStart(handlers, ctx);
+		// system prompt applies every turn
 		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		expect(calls.setModel).toHaveLength(1);
@@ -355,7 +375,7 @@ describe("before_agent_start", () => {
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
+		await runApplySessionStart(handlers, makeCtx());
 		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
@@ -658,7 +678,9 @@ describe("second-pass review coverage", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		(pi as unknown as { setModel: () => Promise<boolean> }).setModel = async () => false;
 		factory(pi);
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" }))) as BeforeAgentStartEventResult;
+		const ctx = modelCtx(() => ({ id: "y" }));
+		await runApplySessionStart(handlers, ctx);
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx) as BeforeAgentStartEventResult;
 		expect(calls.setThinkingLevel).toEqual(["high"]);
 		expect(calls.setActiveTools).toEqual([["read"]]);
 		expect(r.systemPrompt).toContain("sp");
@@ -735,38 +757,38 @@ function setupPrefix(profile: string | undefined, sessionName?: string) {
 describe("session_start prefix hook", () => {
 	it("prefixes an existing --name on startup when a profile is active", async () => {
 		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toEqual(["[planner] Refactor auth"]);
 	});
 
 	it("does nothing when no profile is active", async () => {
 		const { calls, handlers } = setupPrefix(undefined, "Refactor auth");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toHaveLength(0);
 	});
 
 	it("skips a name that already carries the prefix (resume of a pre-prefixed session)", async () => {
 		const { calls, handlers } = setupPrefix("planner", "[planner] Refactor auth");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "resume" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toHaveLength(0);
 	});
 
 	it("does nothing when there is no session name yet (/new)", async () => {
 		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "new" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toHaveLength(0);
 	});
 
 	it("is disabled by config prefix_session_name=false", async () => {
 		writeConfig({ prefix_session_name: false });
 		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toHaveLength(0);
 	});
 
 	it("ignores an invalid profile name (no prefix tag from a bad flag)", async () => {
 		const { calls, handlers } = setupPrefix("../p", "Refactor auth");
-		await handlers.get("session_start")![0]({ type: "session_start", reason: "startup" }, makeCtx());
+		await runSessionStart(handlers, makeCtx());
 		expect(calls.setSessionName).toHaveLength(0);
 	});
 });
@@ -821,6 +843,33 @@ describe("session_info_changed prefix hook", () => {
 	});
 });
 
+describe("parseModelRef + combined model format", () => {
+	it("splits a combined provider/id model field", () => {
+		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+	});
+	it("uses the separate provider when model has no slash", () => {
+		expect(parseModelRef("ollama-cloud", "glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+	});
+	it("combined model field ignores a redundant separate provider", () => {
+		expect(parseModelRef("ollama-cloud", "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2" });
+	});
+	it("bare model with no provider yields undefined provider", () => {
+		expect(parseModelRef(undefined, "glm-5.2")).toEqual({ provider: undefined, modelId: "glm-5.2" });
+	});
+
+	it("session_start applies a combined-format model + thinking", async () => {
+		writeProfile("brain", { model: "ollama-cloud/glm-5.2", thinking: "high", system_prompt: "sp" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "brain"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+	});
+});
+
 describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 	const originalArgv = process.argv;
 	afterEach(() => {
@@ -847,7 +896,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		process.argv = ["node", "pi", "--profile", "p", "--model", "ollama-cloud/glm-5.2"];
-		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setModel).toHaveLength(0);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
 		expect(calls.setActiveTools).toEqual([["read"]]);
@@ -860,7 +909,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		process.argv = ["node", "pi", "--profile", "p", "--thinking", "low"];
-		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setModel).toHaveLength(1);
 		expect(calls.setThinkingLevel).toHaveLength(0);
 	});
@@ -872,7 +921,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		process.argv = ["node", "pi", "--profile", "p", "--tools", "bash"];
-		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setModel).toHaveLength(1);
 		expect(calls.setActiveTools).toHaveLength(0);
 	});
@@ -884,7 +933,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		process.argv = ["node", "pi", "--profile", "p", "-t", "bash"];
-		await handlers.get("before_agent_start")![0](event("BUILT-IN"), modelCtx(() => ({ id: "y" })));
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setActiveTools).toHaveLength(0);
 	});
 });

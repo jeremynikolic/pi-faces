@@ -1,5 +1,9 @@
 # pi-agent-profiles
 
+<p align="center">
+  <img src="docs/banner.png" alt="pi-agent-profiles" width="1280">
+</p>
+
 Agent profiles for `pi` — bundle a short description, model, provider, thinking level, tools, and system prompt into a named JSON file, selected via `--profile <name>`. Managed with the `/profiles` slash command.
 
 ## Install

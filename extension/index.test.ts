@@ -39,7 +39,7 @@ type BeforeAgentHandler = (
 
 function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 	const handlers = new Map<string, BeforeAgentHandler[]>();
-	let command: CapturedCommand | undefined;
+	const commands = new Map<string, CapturedCommand>();
 	const allTools: { name: string }[] = [
 		{ name: "read" }, { name: "bash" }, { name: "edit" }, { name: "write" }, { name: "grep" }, { name: "find" }, { name: "ls" },
 	];
@@ -52,8 +52,8 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 			list.push(h);
 			handlers.set(ev, list);
 		},
-		registerCommand: (_name: string, o: CapturedCommand) => {
-			command = o;
+		registerCommand: (name: string, o: CapturedCommand) => {
+			commands.set(name, o);
 		},
 		sendMessage: (m: { customType: string; content: string; display: boolean }) => calls.sendMessage.push(m),
 		setModel: async (model: unknown) => {
@@ -64,7 +64,7 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		setActiveTools: (tools: string[]) => calls.setActiveTools.push(tools),
 		getAllTools: () => allTools,
 	} as unknown as ExtensionAPI;
-	return { pi, handlers, command: () => command };
+	return { pi, handlers, command: (name: string) => commands.get(name) };
 }
 
 interface UiOpts {
@@ -347,7 +347,7 @@ describe("before_agent_start", () => {
 describe("/profiles command", () => {
 	it("list prints an empty message when there are no profiles", async () => {
 		const { calls, command } = setupCommand();
-		await command()!.handler("list", makeCtx());
+		await command("profiles")!.handler("list", makeCtx());
 		expect(calls.sendMessage).toHaveLength(1);
 		expect(calls.sendMessage[0].content).toContain("No profiles found in");
 	});
@@ -357,7 +357,7 @@ describe("/profiles command", () => {
 		writeProfile("alpha", { description: "a" });
 		writeProfile("mid", {});
 		const { calls, command } = setupCommand();
-		await command()!.handler("list", makeCtx());
+		await command("profiles")!.handler("list", makeCtx());
 		expect(calls.sendMessage).toHaveLength(1);
 		const body = calls.sendMessage[0].content;
 		expect(body.indexOf("alpha")).toBeLessThan(body.indexOf("mid"));
@@ -368,34 +368,34 @@ describe("/profiles command", () => {
 
 	it("default subcommand is list", async () => {
 		const { calls, command } = setupCommand();
-		await command()!.handler("", makeCtx());
+		await command("profiles")!.handler("", makeCtx());
 		expect(calls.sendMessage).toHaveLength(1);
 		expect(calls.sendMessage[0].content).toContain("No profiles found");
 	});
 
 	it("ls alias dispatches to list", async () => {
 		const { calls, command } = setupCommand();
-		await command()!.handler("ls", makeCtx());
+		await command("profiles")!.handler("ls", makeCtx());
 		expect(calls.sendMessage).toHaveLength(1);
 	});
 
 	it("show prints the profile JSON; cat alias does the same", async () => {
 		writeProfile("p", { description: "d" });
 		const { calls, command } = setupCommand();
-		await command()!.handler("cat p", makeCtx());
+		await command("profiles")!.handler("cat p", makeCtx());
 		expect(calls.sendMessage[0].content).toContain('"description":"d"');
 	});
 
 	it("show with an invalid/missing name notifies and does not message", async () => {
 		const { calls, command } = setupCommand();
-		await command()!.handler("show ../x", makeCtx());
-		await command()!.handler("show nope", makeCtx());
+		await command("profiles")!.handler("show ../x", makeCtx());
+		await command("profiles")!.handler("show nope", makeCtx());
 		expect(calls.sendMessage).toHaveLength(0);
 	});
 
 	it("new writes a scaffold when the destination is absent (no UI)", async () => {
 		const { command } = setupCommand();
-		await command()!.handler("new demo", makeCtx());
+		await command("profiles")!.handler("new demo", makeCtx());
 		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 		const scaffold = JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8"));
 		expect(scaffold.description).toBe("TODO: describe this profile's purpose");
@@ -403,76 +403,76 @@ describe("/profiles command", () => {
 
 	it("create alias dispatches to new", async () => {
 		const { command } = setupCommand();
-		await command()!.handler("create demo", makeCtx());
+		await command("profiles")!.handler("create demo", makeCtx());
 		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 	});
 
 	it("new bails non-interactively when the destination exists", async () => {
 		writeProfile("demo", { description: "old" });
 		const { command } = setupCommand();
-		await command()!.handler("new demo", makeCtx());
+		await command("profiles")!.handler("new demo", makeCtx());
 		expect(JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8")).description).toBe("old");
 	});
 
 	it("new with an invalid name notifies usage and writes nothing", async () => {
 		const { command } = setupCommand();
-		await command()!.handler("new ../x", makeCtx());
+		await command("profiles")!.handler("new ../x", makeCtx());
 		expect(existsSync(join(dir, "x.json"))).toBe(false);
 	});
 
 	it("edit requires an interactive session (no UI → notify, file untouched)", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("edit p", makeCtx());
+		await command("profiles")!.handler("edit p", makeCtx());
 		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("d");
 	});
 
 	it("edit with UI saves valid JSON", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => '{"description":"edited"}' }) }));
+		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => '{"description":"edited"}' }) }));
 		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("edited");
 	});
 
 	it("edit with UI + invalid JSON + confirm-false leaves the file unchanged", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => false }) }));
+		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => false }) }));
 		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("d");
 	});
 
 	it("edit with UI + invalid JSON + confirm-true saves the invalid content", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => true }) }));
+		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => true }) }));
 		expect(readFileSync(join(dir, "p.json"), "utf-8")).toBe("{not json");
 	});
 
 	it("delete requires confirmation (no UI → notify, file remains)", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("delete p", makeCtx());
+		await command("profiles")!.handler("delete p", makeCtx());
 		expect(existsSync(join(dir, "p.json"))).toBe(true);
 	});
 
 	it("delete with UI + confirm-false keeps the file", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => false }) }));
+		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => false }) }));
 		expect(existsSync(join(dir, "p.json"))).toBe(true);
 	});
 
 	it("delete with UI + confirm-true removes the file", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 	});
 
 	it("rm alias dispatches to delete", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("rm p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		await command("profiles")!.handler("rm p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 	});
 
@@ -481,7 +481,7 @@ describe("/profiles command", () => {
 		mkdirSync(join(dir, "p"));
 		writeFileSync(join(dir, "p", "sp.md"), "prompt");
 		const { command } = setupCommand();
-		await command()!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 		expect(existsSync(join(dir, "p"))).toBe(false);
 	});
@@ -491,7 +491,7 @@ describe("/profiles command", () => {
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
 		const { command } = setupCommand();
-		await command()!.handler("rename old new", makeCtx());
+		await command("profiles")!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "new.json"))).toBe(true);
 		expect(existsSync(join(dir, "old.json"))).toBe(false);
 		expect(existsSync(join(dir, "new", "system-prompt.md"))).toBe(true);
@@ -504,7 +504,7 @@ describe("/profiles command", () => {
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
 		writeFileSync(join(dir, "new"), "blocker"); // makes toDir a file → dir rename fails
 		const { command } = setupCommand();
-		await command()!.handler("rename old new", makeCtx());
+		await command("profiles")!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "old.json"))).toBe(true);
 		expect(existsSync(join(dir, "new.json"))).toBe(false);
 	});
@@ -514,7 +514,7 @@ describe("/profiles command", () => {
 		mkdirSync(join(dir, "old"));
 		mkdirSync(join(dir, "new"));
 		const { command } = setupCommand();
-		await command()!.handler("rename old new", makeCtx());
+		await command("profiles")!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "old.json"))).toBe(true);
 		expect(existsSync(join(dir, "old"))).toBe(true);
 		expect(existsSync(join(dir, "new"))).toBe(true);
@@ -523,21 +523,21 @@ describe("/profiles command", () => {
 	it("mv alias dispatches to rename (file-only happy path)", async () => {
 		writeProfile("a", { description: "d" });
 		const { command } = setupCommand();
-		await command()!.handler("mv a b", makeCtx());
+		await command("profiles")!.handler("mv a b", makeCtx());
 		expect(existsSync(join(dir, "b.json"))).toBe(true);
 		expect(existsSync(join(dir, "a.json"))).toBe(false);
 	});
 
 	it("bogus subcommand notifies usage without crashing", async () => {
 		const { command } = setupCommand();
-		await command()!.handler("bogus", makeCtx());
+		await command("profiles")!.handler("bogus", makeCtx());
 	});
 
 	it("getArgumentCompletions completes subcommands when no space typed", async () => {
 		const { command } = setupCommand();
-		const r = command()!.getArgumentCompletions("sh") as { value: string }[];
+		const r = command("profiles")!.getArgumentCompletions("sh") as { value: string }[];
 		expect(r.map((c) => c.value).sort()).toEqual(["show"]);
-		const all = command()!.getArgumentCompletions("") as { value: string }[];
+		const all = command("profiles")!.getArgumentCompletions("") as { value: string }[];
 		expect(all.map((c) => c.value)).toEqual(
 			expect.arrayContaining(["list", "show", "new", "edit", "delete", "rename", "ls", "cat", "create", "rm", "remove", "mv"])
 		);
@@ -547,25 +547,70 @@ describe("/profiles command", () => {
 		writeProfile("planner", { description: "d" });
 		writeProfile("coder", {});
 		const { command } = setupCommand();
-		const r = command()!.getArgumentCompletions("show p") as { value: string }[];
+		const r = command("profiles")!.getArgumentCompletions("show p") as { value: string }[];
 		expect(r.map((c) => c.value)).toEqual(["planner"]);
 	});
 
 	it("getArgumentCompletions returns null for rename target (second arg)", async () => {
 		writeProfile("planner", { description: "d" });
 		const { command } = setupCommand();
-		expect(command()!.getArgumentCompletions("rename planner ")).toBe(null);
+		expect(command("profiles")!.getArgumentCompletions("rename planner ")).toBe(null);
 	});
 
 	it("getArgumentCompletions completes source for rename", async () => {
 		writeProfile("planner", { description: "d" });
 		const { command } = setupCommand();
-		const r = command()!.getArgumentCompletions("rename p") as { value: string }[];
+		const r = command("profiles")!.getArgumentCompletions("rename p") as { value: string }[];
 		expect(r.map((c) => c.value)).toEqual(["planner"]);
 	});
 
 	it("getArgumentCompletions returns null for unknown sub", async () => {
 		const { command } = setupCommand();
-		expect(command()!.getArgumentCompletions("foo x")).toBe(null);
+		expect(command("profiles")!.getArgumentCompletions("foo x")).toBe(null);
+	});
+});
+
+describe("namespaced subcommands (/profiles:show etc.)", () => {
+	it("registers all six namespaced commands", () => {
+		const { command } = setupCommand();
+		for (const name of ["profiles:list", "profiles:show", "profiles:new", "profiles:edit", "profiles:delete", "profiles:rename"]) {
+			expect(command(name)).toBeDefined();
+		}
+	});
+
+	it("profiles:show <name> prints the profile JSON", async () => {
+		writeProfile("demo", { description: "d" });
+		const { calls, command } = setupCommand();
+		await command("profiles:show")!.handler("demo", makeCtx());
+		expect(calls.sendMessage[0].content).toContain('{"description":"d"}');
+	});
+
+	it("profiles:new <name> writes a scaffold", async () => {
+		const { command } = setupCommand();
+		await command("profiles:new")!.handler("demo", makeCtx());
+		expect(existsSync(join(dir, "demo.json"))).toBe(true);
+	});
+
+	it("profiles:rename <old> <new> moves the file", async () => {
+		writeProfile("a", { description: "d" });
+		const { command } = setupCommand();
+		await command("profiles:rename")!.handler("a b", makeCtx());
+		expect(existsSync(join(dir, "b.json"))).toBe(true);
+		expect(existsSync(join(dir, "a.json"))).toBe(false);
+	});
+
+	it("profiles:show completes profile names", async () => {
+		writeProfile("planner", { description: "d" });
+		const { command } = setupCommand();
+		const r = command("profiles:show")!.getArgumentCompletions("p") as { value: string }[];
+		expect(r.map((c) => c.value)).toEqual(["planner"]);
+	});
+
+	it("profiles:rename completes only the source", async () => {
+		writeProfile("planner", { description: "d" });
+		const { command } = setupCommand();
+		expect(command("profiles:rename")!.getArgumentCompletions("planner ")).toBe(null);
+		const r = command("profiles:rename")!.getArgumentCompletions("p") as { value: string }[];
+		expect(r.map((c) => c.value)).toEqual(["planner"]);
 	});
 });

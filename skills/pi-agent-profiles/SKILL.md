@@ -139,16 +139,16 @@ EOF
 
 Use the `/profiles` command inside a pi session:
 
-| Action | Command (aliases in parentheses) |
+| Action | Command (namespaced form + arg form) |
 |---|---|
-| List profiles (name + description) | `/profiles` or `/profiles list` (`ls`) |
-| Show a profile's full JSON | `/profiles show <name>` (`cat`) |
-| Create a profile (scaffold + edit) | `/profiles new <name>` (`create`) |
-| Edit a profile in the editor | `/profiles edit <name>` |
-| Delete a profile (with confirm) | `/profiles delete <name>` (`rm`, `remove`) |
-| Rename a profile (and its prompt dir) | `/profiles rename <old> <new>` (`mv`) |
+| List profiles (name + description) | `/profiles` or `/profiles:list` (`/profiles list` / `ls`) |
+| Show a profile's full JSON | `/profiles:show <name>` (`/profiles show <name>` / `cat`) |
+| Create a profile (scaffold + edit) | `/profiles:new <name>` (`/profiles new <name>` / `create`) |
+| Edit a profile in the editor | `/profiles:edit <name>` (`/profiles edit <name>`) |
+| Delete a profile (with confirm) | `/profiles:delete <name>` (`/profiles delete <name>` / `rm` / `remove`) |
+| Rename a profile (and its prompt dir) | `/profiles:rename <old> <new>` (`/profiles rename <old> <new>` / `mv`) |
 
-Tab completion: after `/profiles ` you get subcommand names; after `show`/`edit`/`delete`/`rename` you get existing profile names (`rename` completes only the source, never the target).
+Each namespaced command (`/profiles:show`, etc.) is its own entry in the slash-command picker. The umbrella `/profiles <sub> …` form and aliases (`ls`, `cat`, `create`, `rm`, `remove`, `mv`) also work. Tab completion: after `/profiles ` you get subcommand names; after `show`/`edit`/`delete`/`rename` you get existing profile names (`rename` completes only the source, never the target).
 
 `/profiles list` and `/profiles show` print into the conversation, so an agent can read the available profiles and their purposes. `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts); `edit` and `delete` use interactive dialogs and require an interactive session. `rename` requires an interactive session only when the target already exists (to confirm overwrite).
 

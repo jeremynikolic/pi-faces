@@ -9,6 +9,8 @@ export interface Profile {
 	tools?: string[];
 	skills?: string[];
 	system_prompt?: string;
+	/** Relative path to a prompt file under the profile root. Mutually exclusive with `system_prompt`. */
+	system_prompt_file?: string;
 	replace_system_prompt?: boolean;
 }
 

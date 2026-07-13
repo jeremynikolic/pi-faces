@@ -94,14 +94,17 @@ export function seedDefaultProfiles(intoDir: string): void {
 	const marker = path.join(intoDir, SEED_MARKER);
 	if (existsSync(marker)) return;
 	try {
-		mkdirSync(intoDir, { recursive: true });
+		mkdirSync(intoDir, { recursive: true, mode: 0o700 });
 		for (const [name, profile] of Object.entries(DEFAULT_PROFILES)) {
 			const file = path.join(intoDir, name + ".json");
 			if (!existsSync(file)) {
-				writeFileSync(file, JSON.stringify(profile, null, 2) + "\n", "utf-8");
+				writeFileSync(file, JSON.stringify(profile, null, 2) + "\n", {
+					encoding: "utf-8",
+					mode: 0o600,
+				});
 			}
 		}
-		writeFileSync(marker, "", "utf-8");
+		writeFileSync(marker, "", { encoding: "utf-8", mode: 0o600 });
 	} catch {
 		// Never break startup over seeding.
 	}

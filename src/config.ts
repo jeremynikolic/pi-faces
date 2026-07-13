@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readBoundedFile } from "./profile.ts";
 import { configPath } from "./paths.ts";
 import type { PackageConfig, ParseConfigResult, ReadConfigResult } from "./types.ts";
+import { MAX_CONFIG_BYTES } from "./limits.ts";
 
 // Session-name prefix feature config.
 //
@@ -50,11 +51,9 @@ export function parseConfigFile(content: string, file: string): ParseConfigResul
 /** Read and parse the package config file. Missing file → defaults (no error). */
 export function readConfigFile(): ReadConfigResult {
 	const file = configPath();
-	let content: string;
-	try {
-		content = readFileSync(file, "utf-8");
-	} catch {
-		return { ok: true, config: {}, warnings: [] };
+	const bounded = readBoundedFile(file, MAX_CONFIG_BYTES, "config");
+	if (!bounded.ok) {
+		return { ok: false, error: bounded.error };
 	}
-	return parseConfigFile(content, file);
+	return parseConfigFile(bounded.content, file);
 }

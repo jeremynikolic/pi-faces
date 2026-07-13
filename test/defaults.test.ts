@@ -6,10 +6,15 @@ import {
 	readFileSync,
 	existsSync,
 	writeFileSync,
+	chmodSync,
+	lstatSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_PROFILES, SEED_MARKER, seedDefaultProfiles } from "../src/defaults.ts";
+import { atomicWrite } from "../src/profile.ts";
+
+const isPosix = process.platform !== "win32";
 
 describe("seedDefaultProfiles", () => {
 	let dir: string;
@@ -59,5 +64,44 @@ describe("seedDefaultProfiles", () => {
 		writeFileSync(join(dir, SEED_MARKER), "");
 		seedDefaultProfiles(dir);
 		expect(readdirSync(dir)).toEqual([SEED_MARKER]);
+	});
+
+	it("creates the dir and files with restrictive modes", () => {
+		if (!isPosix) return;
+		seedDefaultProfiles(dir);
+		expect((lstatSync(dir).mode & 0o777).toString(8)).toBe("700");
+		for (const name of Object.keys(DEFAULT_PROFILES)) {
+			expect((lstatSync(join(dir, name + ".json")).mode & 0o777).toString(8)).toBe("600");
+		}
+		expect((lstatSync(join(dir, SEED_MARKER)).mode & 0o777).toString(8)).toBe("600");
+	});
+});
+
+describe("atomicWrite", () => {
+	let dir: string;
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "piap-atomic-"));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("tightens a pre-existing wider file on replace", () => {
+		if (!isPosix) return;
+		const file = join(dir, "x.json");
+		writeFileSync(file, "old", { mode: 0o644 });
+		atomicWrite(file, "new");
+		expect(readFileSync(file, "utf-8")).toBe("new");
+		expect((lstatSync(file).mode & 0o777).toString(8)).toBe("600");
+	});
+
+	it("keeps an already-restrictive file at 0600", () => {
+		if (!isPosix) return;
+		const file = join(dir, "x.json");
+		writeFileSync(file, "old", { mode: 0o600 });
+		atomicWrite(file, "new");
+		expect((lstatSync(file).mode & 0o777).toString(8)).toBe("600");
 	});
 });

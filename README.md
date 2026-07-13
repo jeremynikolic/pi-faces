@@ -15,7 +15,7 @@ Agent profiles for `pi` — bundle a short description, model, provider, thinkin
 - **Prompt modes**: Append to or replace pi's built-in system prompt (`replace_system_prompt`).
 - **Session name prefix**: Active profile tags the session name so sessions group in `/resume` and `pi -r`.
 - **Seeded defaults**: `planner`, `coder`, and `reviewer` are written into `~/.pi/agent-profiles/` automatically on first run.
-- **Graceful defaults**: Omit any field and `pi` keeps its default; unknown fields and tool names are warned.
+- **Graceful defaults**: Omit any field and `pi` keeps its default; unknown tool names reject profile application; unknown fields are warned.
 
 ## Install
 
@@ -75,15 +75,39 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 | `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
 | `model` | Model ID — bare (`glm-5.2`, paired with `provider`), combined `provider/id` (`ollama-cloud/glm-5.2`), or `provider/id:thinking` (the `:thinking` is used only if `thinking` is unset) | Yes (requires provider unless combined) |
 | `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
-| `tools` | Tool allowlist as array of strings (built-in tools only; MCP/extension tools are always preserved) | Yes |
+| `tools` | Strict tool allowlist across all tool sources (built-in, MCP, extension, custom). Unknown names reject profile application; an empty array means zero tools; omit the field for no restriction. | Yes |
 | `skills` | Skill name allowlist — each resolved to `~/.pi/skills/<name>` + loaded via `resources_discover` | Yes |
-| `system_prompt` | Inline text or path to a file | Yes |
+| `system_prompt` | Inline text only; never interpreted as a path. Mutually exclusive with `system_prompt_file`. | Yes |
+| `system_prompt_file` | Relative path to a prompt file under the profile root. Contained to the profile root, regular file only, max 256 KiB. Mutually exclusive with `system_prompt`. | Yes |
 | `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt. `true`: replace it entirely. | Yes |
 
-`system_prompt` accepts either an inline string or a file path:
+`system_prompt` is **inline text only** — it is never interpreted as a file path. Max 4096 characters.
 
-- File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work.
-- If the string is not a readable file path, it is treated as inline text.
+`system_prompt_file` loads prompt text from a file that is contained inside the profile root:
+
+- Path must be relative (no leading `/` or `~/`, no `..` segment).
+- Resolved path must stay inside the profile root; symlink escapes are rejected.
+- Target must be a regular file and is read once per session.
+- Only one of `system_prompt` or `system_prompt_file` may be present in a profile.
+
+### Trust model
+
+A selected profile is trusted executable configuration / least-privilege policy. It can replace the system prompt, scope the available tools, and inject skill paths, so treat profile JSON like code you would run.
+
+Strict semantics:
+
+- `tools` is a strict allowlist across every source. If any name is unknown, the whole profile is rejected and nothing from it is applied. Empty `[]` means zero tools; omitting the field means no restriction (pi default).
+- `system_prompt` is inline text only. To load a prompt from disk, use `system_prompt_file` with a relative path under the profile root; absolute, tilde, `..`, and symlink-escape paths are rejected.
+- `skills` must be an array of non-empty strings and is validated before use.
+- Profile and config files are read with size limits and only as regular files; oversized, symlinked, or non-regular files are rejected.
+- Storage is created/tightened as private: profile directories `0700`, files `0600`.
+
+Migration notes for existing profiles:
+
+- Profiles that used `system_prompt` as a file path must switch to `system_prompt_file` and place the prompt file under the profile root.
+- Profiles relying on implicit preservation of MCP/extension/custom tools must add each non-built-in tool name explicitly to `tools`.
+- `tools: []` now disables all tools; omit the field if you meant "no restriction".
+- Symlinked profile or config JSON files are rejected; replace them with real files or point `PI_PROFILES_DIR` at the real directory.
 
 ### Skills cherry-pick
 
@@ -133,7 +157,7 @@ The extension registers a `--profile` CLI flag, a `/profiles` slash command, and
 
 **Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely.
 
-Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names are filtered out and warned; unknown profile fields are warned.
+Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names reject profile application; unknown profile fields are warned.
 
 **Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, or `--tools`/`-t` on the command line, the corresponding profile field is skipped for that run, so a profile sets your defaults and a one-off flag overrides them (e.g. `pi --profile planner --model ollama-cloud/kimi-k2.7-code`).
 

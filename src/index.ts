@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { chmodSync, readdirSync } from "node:fs";
+import path from "node:path";
 import { profilesDir } from "./paths.ts";
 import { seedDefaultProfiles } from "./defaults.ts";
 import { ProfileApplier } from "./apply.ts";
@@ -7,11 +9,49 @@ import { registerProfilesCommand } from "./commands.ts";
 
 // Re-export public helpers so tests and consumers can import them from the
 // package entry. The factory below is the pi extension entry point.
-export { resolveSystemPrompt, isValidProfileName, parseProfileFile } from "./profile.ts";
+export { readSystemPromptFile, readBoundedFile, isValidProfileName, parseProfileFile } from "./profile.ts";
 export { parseConfigFile } from "./config.ts";
 export { hasProfilePrefix, withProfilePrefix } from "./prefix.ts";
 export { parseModelRef } from "./apply.ts";
+export * from "./limits.ts";
 export type { Profile, PackageConfig } from "./types.ts";
+
+/**
+ * Best-effort tighten storage modes for the default profiles directory.
+ * Dir → 0700; top-level *.json, .defaults-seeded, and config/config.json → 0600.
+ * Swallows errors so permission issues do not break extension startup.
+ * Skipped entirely when PI_PROFILES_DIR is set (do not chmod a user-managed dir).
+ */
+function tightenStorageModes(dir: string): void {
+	try {
+		chmodSync(dir, 0o700);
+	} catch {
+		// best-effort
+	}
+
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch {
+		return;
+	}
+
+	for (const entry of entries) {
+		if (entry.endsWith(".json") || entry === ".defaults-seeded") {
+			try {
+				chmodSync(path.join(dir, entry), 0o600);
+			} catch {
+				// best-effort
+			}
+		}
+	}
+
+	try {
+		chmodSync(path.join(dir, "config", "config.json"), 0o600);
+	} catch {
+		// best-effort
+	}
+}
 
 /**
  * pi-agent-profiles extension entry point.
@@ -27,7 +67,9 @@ export default function (pi: ExtensionAPI) {
 	const hasProfilesDirOverride =
 		typeof process !== "undefined" && !!process.env && Boolean(process.env.PI_PROFILES_DIR);
 	if (!hasProfilesDirOverride) {
-		seedDefaultProfiles(profilesDir());
+		const dir = profilesDir();
+		seedDefaultProfiles(dir);
+		tightenStorageModes(dir);
 	}
 
 	// Register the --profile CLI flag

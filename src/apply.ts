@@ -4,8 +4,8 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { profilesDir, expandTilde } from "./paths.ts";
-import { isValidProfileName, readProfile, resolveSystemPrompt } from "./profile.ts";
+import { expandTilde, realProfilesRoot } from "./paths.ts";
+import { isValidProfileName, readProfile, readSystemPromptFile } from "./profile.ts";
 import { cliFlagProvided } from "./cli.ts";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -16,16 +16,23 @@ import path from "node:path";
  *
  * Session-level config (model, thinking, tools) is applied once in
  * `session_start` so the agent shows the profile's model/thinking at
- * startup (not pi's defaults). The system prompt is applied every turn
- * in `before_agent_start`. By default the profile prompt is appended to
- * pi's built-in system prompt; `replace_system_prompt: true` swaps it
- * entirely.
+ * startup (not pi's defaults). The system prompt is cached during
+ * `session_start` and applied every turn in `before_agent_start`. By
+ * default the profile prompt is appended to pi's built-in system prompt;
+ * `replace_system_prompt: true` swaps it entirely.
  *
  * Profile fields are defaults — explicit CLI flags (--model/--provider,
  * --thinking, --tools/-t) skip the corresponding profile field.
+ *
+ * A profile that fails validation (unknown tools, unreadable prompt file,
+ * etc.) is rejected entirely: `profileRejected` is set and no profile
+ * policy (model, thinking, tools, prompt, skills) is applied.
  */
 export class ProfileApplier {
 	private profileIssueWarned = false;
+	private profileRejected = false;
+	private cachedPrompt: string | undefined;
+	private replaceSystemPrompt = false;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -44,18 +51,28 @@ export class ProfileApplier {
 		return name;
 	}
 
+	private warnOnce(message: string): void {
+		if (!this.profileIssueWarned) {
+			console.warn("[pi-agent-profiles] " + message);
+			this.profileIssueWarned = true;
+		}
+	}
+
 	/** Apply model/thinking/tools once at session start. */
 	async handleSessionStart(_event: unknown, ctx: ExtensionContext): Promise<void> {
+		// Defense-in-depth reset: each session_start is a fresh validation
+		// opportunity (pi re-fires this on /reload).
+		this.profileRejected = false;
+		this.cachedPrompt = undefined;
+		this.replaceSystemPrompt = false;
+
 		const profileName = this.profileName();
 		if (!profileName) return;
 
-		const dir = profilesDir();
 		const result = readProfile(profileName);
 		if (!result.ok) {
-			if (!this.profileIssueWarned) {
-				console.warn("[pi-agent-profiles] " + result.error);
-				this.profileIssueWarned = true;
-			}
+			this.warnOnce(result.error);
+			this.profileRejected = true;
 			return;
 		}
 		const profile = result.profile;
@@ -65,39 +82,65 @@ export class ProfileApplier {
 			console.warn("[pi-agent-profiles] " + w);
 		}
 
-		// Model + provider. The `model` field accepts either a bare id
-		// ("glm-5.2", paired with `provider`), a combined "provider/id"
-		// ("ollama-cloud/glm-5.2"), or "provider/id:thinking" (matching pi's
-		// --model convention; the :thinking is used only if the profile has no
-		// separate `thinking` field). Skip if the user passed --model or
-		// --provider explicitly.
+		// Eager prompt-file validation + cache. Reject the whole profile if
+		// the declared prompt file is not readable under the profile root.
+		if (profile.system_prompt_file) {
+			const promptResult = readSystemPromptFile(profile.system_prompt_file, realProfilesRoot());
+			if (!promptResult.ok) {
+				this.warnOnce("profile \"" + profileName + "\": " + promptResult.error);
+				this.profileRejected = true;
+				return;
+			}
+			this.cachedPrompt = promptResult.content;
+		} else if (profile.system_prompt) {
+			this.cachedPrompt = profile.system_prompt.trim();
+		}
+		this.replaceSystemPrompt = profile.replace_system_prompt === true;
+
+		// Tools. `tools` is a strict allowlist across every tool source.
+		// Unknown names reject the profile. Absent `tools` leaves pi's
+		// default untouched. Empty `tools: []` sets zero active tools.
+		const tools = profile.tools;
+		if (tools !== undefined && tools !== null && !cliFlagProvided("tools", "t")) {
+			const all = this.pi.getAllTools();
+			const known = new Set(all.map((t) => t.name));
+			const unknown = tools.filter((t) => !known.has(t));
+			if (unknown.length > 0) {
+				this.warnOnce(
+					"profile \"" + profileName + "\": unknown tool(s) rejected profile: " + unknown.join(", ")
+				);
+				this.profileRejected = true;
+				return;
+			}
+			this.pi.setActiveTools([...new Set(tools)]);
+		}
+
+		// Model + provider. Skip if the user passed --model or --provider.
 		const { provider, modelId, thinkingHint } = parseModelRef(profile.provider, profile.model);
 		const modelExplicit = cliFlagProvided("model") || cliFlagProvided("provider");
-		if (modelExplicit) {
-			// pi already applied the user's --model/--provider; leave it.
-		} else if ((provider && !modelId) || (modelId && !provider)) {
-			console.warn(
-				"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
-			);
-		} else if (provider && modelId && ctx.modelRegistry) {
-			const model = ctx.modelRegistry.find(provider, modelId);
-			if (model) {
-				try {
-					const ok = await this.pi.setModel(model);
-					if (!ok) {
-						console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
+		if (!modelExplicit) {
+			if ((provider && !modelId) || (modelId && !provider)) {
+				console.warn(
+					"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
+				);
+			} else if (provider && modelId && ctx.modelRegistry) {
+				const model = ctx.modelRegistry.find(provider, modelId);
+				if (model) {
+					try {
+						const ok = await this.pi.setModel(model);
+						if (!ok) {
+							console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
+						}
+					} catch (err) {
+						console.warn("[pi-agent-profiles] Failed to set model: " + err);
 					}
-				} catch (err) {
-					console.warn("[pi-agent-profiles] Failed to set model: " + err);
+				} else {
+					console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
 				}
-			} else {
-				console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
 			}
 		}
 
-		// Thinking level. A separate `thinking` field wins; otherwise use a
-		// ":thinking" hint parsed from the model field. Skip if the user passed
-		// --thinking explicitly.
+		// Thinking level. Skip if the user passed --thinking explicitly.
 		const thinking = profile.thinking ?? thinkingHint;
 		if (thinking && !cliFlagProvided("thinking")) {
 			try {
@@ -106,62 +149,19 @@ export class ProfileApplier {
 				console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
 			}
 		}
-
-		// Tools. Filter to known tools, dedup, warn on unknown names. Skip if
-		// the user passed --tools/-t explicitly. Empty/absent tools = all tools.
-		const tools = profile.tools;
-		if (tools && tools.length > 0 && !cliFlagProvided("tools", "t")) {
-			try {
-				const all = this.pi.getAllTools();
-				const known = new Set(all.map((t) => t.name));
-				const knownTools = tools.filter((t) => known.has(t));
-				const unknown = tools.filter((t) => !known.has(t));
-				if (unknown.length > 0) {
-					console.warn(
-						"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
-					);
-				}
-				// A profile's `tools` list scopes BUILT-IN tools only. Preserve all
-				// non-builtin tools (MCP servers, extensions, custom) so a profile's
-				// built-in allowlist never filters out non-builtin capabilities (MCP, extensions, custom).
-				const nonBuiltin = all
-					.filter((t) => t.sourceInfo?.source !== "builtin")
-					.map((t) => t.name);
-				// Guard against disabling every tool: if the profile listed only
-				// unknown tools, leave the active tool set unchanged.
-				if (knownTools.length === 0) {
-					console.warn("[pi-agent-profiles] No known tools in profile; tool set unchanged");
-				} else {
-					this.pi.setActiveTools([...new Set([...knownTools, ...nonBuiltin])]);
-				}
-			} catch (err) {
-				console.warn("[pi-agent-profiles] Failed to set tools: " + err);
-			}
-		}
 	}
 
-	/** Apply the system prompt every turn. */
+	/** Apply the cached system prompt every turn. */
 	async handleBeforeAgentStart(
 		event: BeforeAgentStartEvent,
 		_ctx: ExtensionContext
 	): Promise<BeforeAgentStartEventResult | undefined> {
-		const profileName = this.profileName();
-		if (!profileName) return undefined;
-
-		const dir = profilesDir();
-		const result = readProfile(profileName);
-		if (!result.ok) {
-			// Already warned in session_start; stay quiet on later turns.
-			return undefined;
+		if (this.profileRejected) return undefined;
+		if (this.cachedPrompt === undefined) return undefined;
+		if (this.replaceSystemPrompt) {
+			return { systemPrompt: this.cachedPrompt };
 		}
-		const profile = result.profile;
-
-		const systemPrompt = resolveSystemPrompt(profile.system_prompt, dir);
-		if (!systemPrompt) return undefined;
-		if (profile.replace_system_prompt) {
-			return { systemPrompt };
-		}
-		return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
+		return { systemPrompt: event.systemPrompt + "\n\n" + this.cachedPrompt };
 	}
 
 	/** Contribute the profile's curated skill paths (cherry-pick via resources_discover). */
@@ -169,28 +169,36 @@ export class ProfileApplier {
 		_event: { cwd: string; reason: string },
 		_ctx: ExtensionContext
 	): { skillPaths?: string[] } | undefined {
+		if (this.profileRejected) return undefined;
+
 		const profileName = this.profileName();
 		if (!profileName) return undefined;
-		const result = readProfile(profileName);
-		if (!result.ok) return undefined;
-		const skills = result.profile.skills;
-		if (!skills || skills.length === 0) return undefined;
-		const skillPaths: string[] = [];
-		for (const entry of skills) {
-			// Entries containing a path separator (or starting with ~) are treated as
-			// paths (~/... expanded, relative resolved against cwd, absolute as-is).
-			// Bare names are resolved to ~/.pi/skills/<name>.
-			const p = entry.includes("/") || entry.startsWith("~")
-				? path.resolve(expandTilde(entry))
-				: path.join(os.homedir(), ".pi", "skills", entry);
-			if (existsSync(p)) {
-				skillPaths.push(p);
-			} else {
-				console.warn("[pi-agent-profiles] skill not found, skipping: " + entry + " (" + p + ")");
+
+		try {
+			const result = readProfile(profileName);
+			if (!result.ok) return undefined;
+			const skills = result.profile.skills;
+			if (!skills || skills.length === 0) return undefined;
+			const skillPaths: string[] = [];
+			for (const entry of skills) {
+				// Entries containing a path separator (or starting with ~) are treated as
+				// paths (~/... expanded, relative resolved against cwd, absolute as-is).
+				// Bare names are resolved to ~/.pi/skills/<name>.
+				const p = entry.includes("/") || entry.startsWith("~")
+					? path.resolve(expandTilde(entry))
+					: path.join(os.homedir(), ".pi", "skills", entry);
+				if (existsSync(p)) {
+					skillPaths.push(p);
+				} else {
+					console.warn("[pi-agent-profiles] skill not found, skipping: " + entry + " (" + p + ")");
+				}
 			}
+			if (skillPaths.length === 0) return undefined;
+			return { skillPaths };
+		} catch (err) {
+			this.warnOnce("profile \"" + profileName + "\": failed to discover skills: " + err);
+			return undefined;
 		}
-		if (skillPaths.length === 0) return undefined;
-		return { skillPaths };
 	}
 }
 

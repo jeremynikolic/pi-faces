@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import {
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+	mkdirSync,
+	readFileSync,
+	existsSync,
+	symlinkSync,
+	chmodSync,
+	lstatSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -11,7 +22,7 @@ import type {
 	BeforeAgentStartEventResult,
 } from "@earendil-works/pi-coding-agent";
 import factory, {
-	resolveSystemPrompt,
+	readSystemPromptFile,
 	isValidProfileName,
 	parseProfileFile,
 	parseConfigFile,
@@ -21,12 +32,28 @@ import factory, {
 	type Profile,
 	type PackageConfig,
 } from "../src/index.ts";
+import {
+	MAX_INLINE_PROMPT_LENGTH,
+	MAX_PROMPT_FILE_BYTES,
+	MAX_PROMPT_FILE_PATH_LENGTH,
+	MAX_PROFILE_JSON_BYTES,
+	MAX_CONFIG_BYTES,
+	MAX_TOOLS_ENTRIES,
+	MAX_TOOL_NAME_LENGTH,
+	MAX_SKILLS_ENTRIES,
+	MAX_SKILL_ENTRY_LENGTH,
+} from "../src/limits.ts";
+import { resetRealProfilesRoot, realProfilesRoot } from "../src/paths.ts";
+import { readProfile } from "../src/profile.ts";
 
 // Mock node:fs only for renameSync so we can force the sibling-directory move to
 // fail (after the profile file was renamed) and exercise the rollback branch.
 // Everything else delegates to the real fs, so the rest of the suite is
 // unaffected. The flag is reset to null by default.
-const __piapMock = vi.hoisted(() => ({ throwOnRenamePath: null as string | null }));
+const __piapMock = vi.hoisted(() => ({
+	throwOnRenamePath: null as string | null,
+	swapOpenSync: null as string | null,
+}));
 vi.mock("node:fs", async (importActual) => {
 	const actual = await importActual<typeof import("node:fs")>();
 	return {
@@ -36,6 +63,19 @@ vi.mock("node:fs", async (importActual) => {
 				throw new Error("forced dir-rename failure");
 			}
 			return actual.renameSync(from, to);
+		},
+		openSync: (path: string | Buffer, flags: string | number, mode?: number) => {
+			const fd = actual.openSync(path, flags, mode);
+			if (typeof path === "string" && __piapMock.swapOpenSync !== null) {
+				try {
+					actual.unlinkSync(path);
+				} catch {
+					// ignore
+				}
+				actual.symlinkSync(__piapMock.swapOpenSync, path);
+				__piapMock.swapOpenSync = null;
+			}
+			return fd;
 		},
 	};
 });
@@ -201,11 +241,14 @@ let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "piap-test-"));
 	process.env.PI_PROFILES_DIR = dir;
+	resetRealProfilesRoot();
 });
 
 afterEach(() => {
 	delete process.env.PI_PROFILES_DIR;
 	__piapMock.throwOnRenamePath = null;
+	__piapMock.swapOpenSync = null;
+	vi.restoreAllMocks();
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -261,31 +304,130 @@ describe("parseProfileFile", () => {
 	});
 });
 
-describe("resolveSystemPrompt", () => {
-	it("returns inline text when not a readable file path", () => {
-		expect(resolveSystemPrompt("You are a planner.", dir)).toBe("You are a planner.");
-	});
-	it("returns undefined for empty/non-string", () => {
-		expect(resolveSystemPrompt(undefined, dir)).toBeUndefined();
-		expect(resolveSystemPrompt("", dir)).toBeUndefined();
-		expect(resolveSystemPrompt(null, dir)).toBeUndefined();
-	});
-	it("reads a file relative to the profile JSON's directory", () => {
-		writeFileSync(join(dir, "system-prompt.md"), "  file prompt  ");
-		expect(resolveSystemPrompt("./system-prompt.md", dir)).toBe("file prompt");
-	});
-	it("resolves a per-profile subdir path against the JSON directory", () => {
+describe("readSystemPromptFile", () => {
+	it("loads an in-root regular file, trimmed", () => {
 		mkdirSync(join(dir, "planner"));
-		writeFileSync(join(dir, "planner", "system-prompt.md"), "nested prompt");
-		expect(resolveSystemPrompt("./planner/system-prompt.md", dir)).toBe("nested prompt");
+		writeFileSync(join(dir, "planner", "sp.md"), "  file prompt  ");
+		const r = readSystemPromptFile("./planner/sp.md", dir);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.content).toBe("file prompt");
 	});
-	it("falls back to inline text when the relative path is not a file", () => {
-		expect(resolveSystemPrompt("./missing.md", dir)).toBe("./missing.md");
+
+	it("rejects a .. segment", () => {
+		const r = readSystemPromptFile("./../escape.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("./../escape.md");
 	});
-	it("reads absolute paths", () => {
-		const abs = join(dir, "abs.md");
-		writeFileSync(abs, "absolute");
-		expect(resolveSystemPrompt(abs, dir)).toBe("absolute");
+
+	it("rejects an absolute path", () => {
+		const r = readSystemPromptFile("/etc/passwd", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("/etc/passwd");
+	});
+
+	it("rejects a tilde path", () => {
+		const r = readSystemPromptFile("~/secret", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("~/secret");
+	});
+
+	it("rejects an empty value", () => {
+		expect(readSystemPromptFile("", dir).ok).toBe(false);
+		expect(readSystemPromptFile(undefined, dir).ok).toBe(false);
+	});
+
+	it("follows an in-root symlink", () => {
+		mkdirSync(join(dir, "prompts"));
+		writeFileSync(join(dir, "prompts", "target.md"), "target");
+		symlinkSync(join(dir, "prompts", "target.md"), join(dir, "link.md"));
+		const r = readSystemPromptFile("./link.md", dir);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.content).toBe("target");
+	});
+
+	it("rejects a symlink that escapes the profile root", () => {
+		const external = mkdtempSync(join(tmpdir(), "piap-ext-"));
+		writeFileSync(join(external, "secret.md"), "external");
+		symlinkSync(join(external, "secret.md"), join(dir, "escape.md"));
+		const r = readSystemPromptFile("./escape.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.error).toContain("./escape.md");
+			expect(r.error).not.toContain("external");
+		}
+		rmSync(external, { recursive: true, force: true });
+	});
+
+	it("rejects a symlink to a non-existent target", () => {
+		symlinkSync(join(dir, "missing.md"), join(dir, "dangling.md"));
+		const r = readSystemPromptFile("./dangling.md", dir);
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects a directory path", () => {
+		mkdirSync(join(dir, "prompts"));
+		const r = readSystemPromptFile("./prompts", dir);
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects a FIFO at the path", () => {
+		if (process.platform === "win32") return;
+		const fifo = join(dir, "pipe");
+		spawnSync("mkfifo", [fifo]);
+		const r = readSystemPromptFile("./pipe", dir);
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects an oversized file without reading content", () => {
+		const p = join(dir, "huge.md");
+		writeFileSync(p, Buffer.alloc(MAX_PROMPT_FILE_BYTES + 1, "x"));
+		const r = readSystemPromptFile("./huge.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.error).toContain(String(MAX_PROMPT_FILE_BYTES + 1));
+			expect(r.error).not.toContain("xxxxxxxx");
+		}
+	});
+
+	it("rejects a non-existent relative path", () => {
+		const r = readSystemPromptFile("./missing.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("./missing.md");
+	});
+
+	it("loads an in-root file when the profile root itself is a symlink", () => {
+		const real = mkdtempSync(join(tmpdir(), "piap-realroot-"));
+		writeFileSync(join(real, "sp.md"), "symlinked root");
+		const linkDir = join(tmpdir(), "piap-linkroot-" + Date.now());
+		symlinkSync(real, linkDir);
+		process.env.PI_PROFILES_DIR = linkDir;
+		resetRealProfilesRoot();
+		const r = readSystemPromptFile("./sp.md", realProfilesRoot());
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.content).toBe("symlinked root");
+		// .. from the symlinked root is still rejected against the real root.
+		const up = readSystemPromptFile("./../escape.md", realProfilesRoot());
+		expect(up.ok).toBe(false);
+		rmSync(real, { recursive: true, force: true });
+		try {
+			rmSync(linkDir, { recursive: true, force: true });
+		} catch {
+			// symlink to dir may need unlink
+		}
+	});
+
+	it("returns the originally-opened inode content after a mid-call symlink swap (F-S1)", () => {
+		const external = mkdtempSync(join(tmpdir(), "piap-swap-ext-"));
+		writeFileSync(join(external, "target.md"), "external");
+		writeFileSync(join(dir, "sp.md"), "good");
+		__piapMock.swapOpenSync = join(external, "target.md");
+		const r = readSystemPromptFile("./sp.md", dir);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.content).toBe("good");
+		// After the call the path should point at the swap target, proving the
+		// swap happened, but the returned content is from the original inode.
+		expect(readFileSync(join(dir, "sp.md"), "utf-8")).toBe("external");
+		rmSync(external, { recursive: true, force: true });
 	});
 });
 
@@ -352,7 +494,7 @@ describe("before_agent_start", () => {
 		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		expect(calls.setModel).toHaveLength(1);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read", "bash", "mcp_coord", "ext_extra"]]);
+		expect(calls.setActiveTools).toEqual([["read", "bash"]]);
 		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
 		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
 		expect(calls.setThinkingLevel).toHaveLength(1);
@@ -364,6 +506,7 @@ describe("before_agent_start", () => {
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
 		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
 		expect(r).toEqual({ systemPrompt: "ONLY THIS" });
 	});
@@ -378,26 +521,29 @@ describe("before_agent_start", () => {
 		expect(calls.setModel).toHaveLength(0);
 	});
 
-	it("filters unknown tools and dedups", async () => {
+	it("rejects unknown tools entirely", async () => {
 		writeProfile("p", { tools: ["read", "read", "nope"] });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toBeUndefined();
 	});
 
-	it("preserves non-builtin (MCP/extension) tools alongside the profile's built-in allowlist", async () => {
+	it("drops non-builtin tools unless explicitly named", async () => {
 		writeProfile("p", { tools: ["read"] });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
-		// listed built-in (read) kept; unlisted built-ins (bash/edit/write/grep/find/ls) dropped;
-		// non-builtin tools (mcp_coord, ext_extra) preserved — not filtered out by the allowlist.
-		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
+		// Strict allowlist: only named tools are active.
+		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
 	it("warns when the model is not found in the registry", async () => {
@@ -422,13 +568,14 @@ describe("before_agent_start", () => {
 		expect(calls.setModel).toHaveLength(0);
 	});
 
-	it("resolves a system_prompt file path relative to the JSON dir", async () => {
+	it("loads system prompt from system_prompt_file relative to the profile root", async () => {
 		writeFileSync(join(dir, "sp.md"), "file prompt");
-		writeProfile("p", { system_prompt: "./sp.md" });
+		writeProfile("p", { system_prompt_file: "./sp.md" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
 		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
 		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\nfile prompt" });
 	});
@@ -703,7 +850,7 @@ describe("second-pass review coverage", () => {
 		await runApplySessionStart(handlers, ctx);
 		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx) as BeforeAgentStartEventResult;
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
+		expect(calls.setActiveTools).toEqual([["read"]]);
 		expect(r.systemPrompt).toContain("sp");
 	});
 });
@@ -936,7 +1083,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setModel).toHaveLength(0);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
+		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
 	it("--thinking explicit skips profile thinking but still applies model", async () => {
@@ -972,5 +1119,352 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		process.argv = ["node", "pi", "--profile", "p", "-t", "bash"];
 		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setActiveTools).toHaveLength(0);
+	});
+});
+
+// --- adversarial / security suite ------------------------------------------------
+
+describe("parseProfileFile validation", () => {
+	it("rejects system_prompt and system_prompt_file together", () => {
+		const r = parseProfileFile(
+			'{"system_prompt":"inline","system_prompt_file":"./sp.md"}',
+			"f.json"
+		);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("Only one of system_prompt or system_prompt_file");
+	});
+
+	it("rejects an empty system_prompt_file", () => {
+		const r = parseProfileFile('{"system_prompt_file":""}', "f.json");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("system_prompt_file must not be empty");
+	});
+
+	it("rejects an over-long inline system_prompt", () => {
+		const r = parseProfileFile('{"system_prompt":"' + "x".repeat(MAX_INLINE_PROMPT_LENGTH + 1) + '"}', "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects a system_prompt_file path that is too long", () => {
+		const r = parseProfileFile('{"system_prompt_file":"' + "x".repeat(MAX_PROMPT_FILE_PATH_LENGTH + 1) + '"}', "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects tools with more than MAX_TOOLS_ENTRIES entries", () => {
+		const r = parseProfileFile('{"tools":' + JSON.stringify(Array(MAX_TOOLS_ENTRIES + 1).fill("read")) + "}", "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects an empty tool name", () => {
+		const r = parseProfileFile('{"tools":[""]}', "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects a tool name that is too long", () => {
+		const r = parseProfileFile('{"tools":["' + "x".repeat(MAX_TOOL_NAME_LENGTH + 1) + '"]}', "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects skills with non-string entries", () => {
+		expect(parseProfileFile('{"skills":[1]}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"skills":"x"}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"skills":["a",{"b":1}]}', "f.json").ok).toBe(false);
+	});
+
+	it("rejects an empty skill entry", () => {
+		expect(parseProfileFile('{"skills":["","a"]}', "f.json").ok).toBe(false);
+	});
+
+	it("deduplicates skills (case-sensitive)", () => {
+		const r = parseProfileFile('{"skills":["a","a","b","A"]}', "f.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.profile.skills).toEqual(["a", "b", "A"]);
+	});
+
+	it("rejects more than MAX_SKILLS_ENTRIES skills", () => {
+		const r = parseProfileFile('{"skills":' + JSON.stringify(Array(MAX_SKILLS_ENTRIES + 1).fill("s")) + "}", "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects a skill entry that is too long", () => {
+		const r = parseProfileFile('{"skills":["' + "x".repeat(MAX_SKILL_ENTRY_LENGTH + 1) + '"]}', "f.json");
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects non-string provider, model, system_prompt, and system_prompt_file", () => {
+		expect(parseProfileFile('{"provider":{}}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"model":123}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"system_prompt":[]}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"system_prompt_file":true}', "f.json").ok).toBe(false);
+	});
+});
+
+describe("system_prompt is inline text only", () => {
+	it("does not read a path-looking inline system_prompt", async () => {
+		writeFileSync(join(dir, "trap.md"), "should not appear");
+		writeProfile("p", { system_prompt: "./trap.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\n./trap.md" });
+	});
+});
+
+describe("strict tools in session_start", () => {
+	it("activates only the named tools", async () => {
+		writeProfile("p", { tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([["read"]]);
+	});
+
+	it("retains explicit non-builtin tools", async () => {
+		writeProfile("p", { tools: ["read", "mcp_coord"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([["read", "mcp_coord"]]);
+	});
+
+	it("rejects a profile with any unknown tool name", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { tools: ["nope"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
+		const r = await handlers.get("before_agent_start")![0](event(), makeCtx());
+		expect(r).toBeUndefined();
+	});
+
+	it("rejects a profile with a mix of known and unknown tool names (no partial apply)", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { tools: ["read", "nope"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
+	});
+
+	it("sets zero tools when tools is an empty array", async () => {
+		writeProfile("p", { tools: [] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([[]]);
+	});
+
+	it("leaves the default tool set when tools is absent", async () => {
+		writeProfile("p", {});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+});
+
+describe("skills resources_discover boundary", () => {
+	it("returns undefined and warns when a malformed Profile slips past parseProfileFile", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const profileMod = await import("../src/profile.ts");
+		vi.spyOn(profileMod, "readProfile").mockReturnValue({
+			ok: true,
+			profile: { skills: [1 as unknown as string] },
+			warnings: [],
+		});
+		writeProfile("p", {});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		// Session start must have run so profileRejected is false and the
+		// resources handler reaches the readProfile call.
+		await runApplySessionStart(handlers, makeCtx());
+		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "test" }, makeCtx());
+		expect(res).toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("failed to discover skills"));
+	});
+});
+
+describe("bounded reads", () => {
+	it("rejects an oversized profile JSON", () => {
+		writeFileSync(join(dir, "big.json"), Buffer.alloc(MAX_PROFILE_JSON_BYTES + 1, "{"));
+		const r = readProfile("big");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toBe("invalid");
+	});
+
+	it("rejects a symlinked profile JSON", () => {
+		const real = mkdtempSync(join(tmpdir(), "piap-realsymlink-"));
+		writeFileSync(join(real, "target.json"), '{"description":"x"}');
+		symlinkSync(join(real, "target.json"), join(dir, "linked.json"));
+		const r = readProfile("linked");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toBe("invalid");
+		rmSync(real, { recursive: true, force: true });
+	});
+
+	it("rejects a directory at the profile path", () => {
+		mkdirSync(join(dir, "dir.json"));
+		const r = readProfile("dir");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toBe("invalid");
+	});
+
+	it("rejects a FIFO at the profile path", () => {
+		if (process.platform === "win32") return;
+		const fifo = join(dir, "fifo.json");
+		spawnSync("mkfifo", [fifo]);
+		const r = readProfile("fifo");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.reason).toBe("invalid");
+	});
+
+	it("rejects an oversized config file", async () => {
+		mkdirSync(join(dir, "config"), { recursive: true });
+		writeFileSync(join(dir, "config", "config.json"), Buffer.alloc(MAX_CONFIG_BYTES + 1, "{"));
+		const { readConfigFile } = await import("../src/config.ts");
+		const r = readConfigFile();
+		expect(r.ok).toBe(false);
+	});
+});
+
+describe("reject propagation", () => {
+	it("does not apply model or thinking when tools are rejected", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["nope"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "y" }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toHaveLength(0);
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
+	});
+
+	it("does not apply model or thinking when system_prompt_file is rejected", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", system_prompt_file: "./../escape.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "y" }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toHaveLength(0);
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("../escape.md"));
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		expect(r).toBeUndefined();
+	});
+
+	it("re-validates on /reload (session_start reason reload)", async () => {
+		writeProfile("p", { tools: ["nope"] });
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+		// Fix the profile and fire a new session_start; strict state is reset.
+		writeProfile("p", { tools: ["read"] });
+		warnSpy.mockClear();
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it("returns undefined from resources_discover when the profile is rejected", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { tools: ["nope"], skills: ["grilling"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "test" }, makeCtx());
+		expect(res).toBeUndefined();
+	});
+
+	it("refreshes cachedPrompt on reload (not stale)", async () => {
+		writeFileSync(join(dir, "sp.md"), "A");
+		writeProfile("p", { system_prompt_file: "./sp.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nA" });
+		writeFileSync(join(dir, "sp.md"), "B");
+		await runApplySessionStart(handlers, makeCtx());
+		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nB" });
+	});
+});
+
+describe("tightenStorageModes", () => {
+	const isPosix = process.platform !== "win32";
+
+	it("tightens default dir and files when PI_PROFILES_DIR is not set", async () => {
+		if (!isPosix) return;
+		const home = mkdtempSync(join(tmpdir(), "piap-home-"));
+		const prevHome = process.env.HOME;
+		process.env.HOME = home;
+		delete process.env.PI_PROFILES_DIR;
+		resetRealProfilesRoot();
+		const calls = makeCalls();
+		const { pi } = makePi(calls, new Map());
+		factory(pi);
+		const expectedDir = join(home, ".pi", "agent-profiles");
+		expect(existsSync(expectedDir)).toBe(true);
+		expect((lstatSync(expectedDir).mode & 0o777).toString(8)).toBe("700");
+		for (const name of ["planner.json", "coder.json", "reviewer.json", ".defaults-seeded"]) {
+			expect((lstatSync(join(expectedDir, name)).mode & 0o777).toString(8)).toBe("600");
+		}
+		process.env.HOME = prevHome;
+		rmSync(home, { recursive: true, force: true });
+	});
+
+	it("skips the chmod walk when PI_PROFILES_DIR is set", async () => {
+		if (!isPosix) return;
+		const override = mkdtempSync(join(tmpdir(), "piap-override-"));
+		mkdirSync(join(override, "config"), { recursive: true });
+		writeFileSync(join(override, "p.json"), '{"description":"x"}', { mode: 0o644 });
+		writeFileSync(join(override, "config", "config.json"), "{}", { mode: 0o644 });
+		chmodSync(override, 0o755);
+		process.env.PI_PROFILES_DIR = override;
+		resetRealProfilesRoot();
+		const calls = makeCalls();
+		const { pi } = makePi(calls, new Map());
+		factory(pi);
+		expect((lstatSync(override).mode & 0o777).toString(8)).toBe("755");
+		expect((lstatSync(join(override, "p.json")).mode & 0o777).toString(8)).toBe("644");
+		expect((lstatSync(join(override, "config", "config.json")).mode & 0o777).toString(8)).toBe("644");
+		rmSync(override, { recursive: true, force: true });
 	});
 });

@@ -4,7 +4,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { profilesDir } from "./paths.ts";
+import { profilesDir, expandTilde } from "./paths.ts";
 import { isValidProfileName, readProfile, resolveSystemPrompt } from "./profile.ts";
 import { cliFlagProvided } from "./cli.ts";
 import { existsSync } from "node:fs";
@@ -176,12 +176,17 @@ export class ProfileApplier {
 		const skills = result.profile.skills;
 		if (!skills || skills.length === 0) return undefined;
 		const skillPaths: string[] = [];
-		for (const name of skills) {
-			const p = path.join(os.homedir(), ".pi", "skills", name);
+		for (const entry of skills) {
+			// Entries containing a path separator (or starting with ~) are treated as
+			// paths (~/... expanded, relative resolved against cwd, absolute as-is).
+			// Bare names are resolved to ~/.pi/skills/<name>.
+			const p = entry.includes("/") || entry.startsWith("~")
+				? path.resolve(expandTilde(entry))
+				: path.join(os.homedir(), ".pi", "skills", entry);
 			if (existsSync(p)) {
 				skillPaths.push(p);
 			} else {
-				console.warn("[pi-agent-profiles] skill not found, skipping: " + name + " (" + p + ")");
+				console.warn("[pi-agent-profiles] skill not found, skipping: " + entry + " (" + p + ")");
 			}
 		}
 		if (skillPaths.length === 0) return undefined;

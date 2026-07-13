@@ -87,7 +87,7 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 
 ### Skills cherry-pick
 
-The `skills` field lists skill **names** (not paths). At session start, the extension's `resources_discover` handler resolves each name to `~/.pi/skills/<name>` and contributes them as skill paths. Skills missing from that directory are skipped with a warning (no crash).
+The `skills` field lists skill **names** or **paths**. At session start, the extension's `resources_discover` handler resolves each entry and contributes it as a skill path. Bare names resolve to `~/.pi/skills/<name>`; entries containing a path separator (or starting with `~`) are treated as paths (`~/` expanded, relative resolved against cwd, absolute as-is). Skills missing from the resolved path are skipped with a warning (no crash).
 
 - **Additive (default):** if the spawn command does **not** pass `--no-skills`, pi's global skill discovery loads all skills in `~/.pi/skills` **plus** the profile's curated ones. The `skills` field guarantees the curated set is loaded; it does not exclude others.
 - **Hard cherry-pick:** pass `--no-skills` on the spawn command (e.g. `pi --profile coder --no-skills`) to disable global discovery. Then **only** the profile's `skills` list loads — nothing else. This is the per-profile skill cherry-pick.

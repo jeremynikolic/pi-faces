@@ -63,6 +63,7 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
   "model": "glm-5.2",
   "thinking": "high",
   "tools": ["read", "bash", "grep"],
+  "skills": ["grilling", "domain-modeling"],
   "system_prompt": "You are a planning agent...",
   "replace_system_prompt": false
 }
@@ -74,7 +75,8 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 | `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
 | `model` | Model ID — bare (`glm-5.2`, paired with `provider`), combined `provider/id` (`ollama-cloud/glm-5.2`), or `provider/id:thinking` (the `:thinking` is used only if `thinking` is unset) | Yes (requires provider unless combined) |
 | `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
-| `tools` | Tool allowlist as array of strings | Yes |
+| `tools` | Tool allowlist as array of strings (built-in tools only; MCP/extension tools are always preserved) | Yes |
+| `skills` | Skill name allowlist — each resolved to `~/.pi/skills/<name>` + loaded via `resources_discover` | Yes |
 | `system_prompt` | Inline text or path to a file | Yes |
 | `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt. `true`: replace it entirely. | Yes |
 
@@ -82,6 +84,15 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 
 - File paths resolve relative to the profile JSON's directory; absolute and `~/` paths also work.
 - If the string is not a readable file path, it is treated as inline text.
+
+### Skills cherry-pick
+
+The `skills` field lists skill **names** (not paths). At session start, the extension's `resources_discover` handler resolves each name to `~/.pi/skills/<name>` and contributes them as skill paths. Skills missing from that directory are skipped with a warning (no crash).
+
+- **Additive (default):** if the spawn command does **not** pass `--no-skills`, pi's global skill discovery loads all skills in `~/.pi/skills` **plus** the profile's curated ones. The `skills` field guarantees the curated set is loaded; it does not exclude others.
+- **Hard cherry-pick:** pass `--no-skills` on the spawn command (e.g. `pi --profile coder --no-skills`) to disable global discovery. Then **only** the profile's `skills` list loads — nothing else. This is the per-profile skill cherry-pick.
+
+Skills with `disable-model-invocation: true` in their frontmatter are **user-only** slash commands — they load but the agent cannot invoke them autonomously, so they're dead weight in an autonomous profile's `skills` list. Omit them.
 
 Unknown fields are reported as a warning (catches typos).
 

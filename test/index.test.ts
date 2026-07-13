@@ -68,8 +68,17 @@ type BeforeAgentHandler = (
 function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 	const handlers = new Map<string, AnyHandler[]>();
 	const commands = new Map<string, CapturedCommand>();
-	const allTools: { name: string }[] = [
-		{ name: "read" }, { name: "bash" }, { name: "edit" }, { name: "write" }, { name: "grep" }, { name: "find" }, { name: "ls" },
+	const allTools: { name: string; sourceInfo?: { source: string } }[] = [
+		{ name: "read", sourceInfo: { source: "builtin" } },
+		{ name: "bash", sourceInfo: { source: "builtin" } },
+		{ name: "edit", sourceInfo: { source: "builtin" } },
+		{ name: "write", sourceInfo: { source: "builtin" } },
+		{ name: "grep", sourceInfo: { source: "builtin" } },
+		{ name: "find", sourceInfo: { source: "builtin" } },
+		{ name: "ls", sourceInfo: { source: "builtin" } },
+		// Non-builtin tools (MCP/extension) must be preserved by a profile's built-in allowlist.
+		{ name: "mcp_coord", sourceInfo: { source: "mcp" } },
+		{ name: "ext_extra", sourceInfo: { source: "extension" } },
 	];
 	// Mutable session name state so getSessionName/setSessionName round-trip like
 	// the real SessionManager: setSessionName updates it, getSessionName reads it.
@@ -343,7 +352,7 @@ describe("before_agent_start", () => {
 		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		expect(calls.setModel).toHaveLength(1);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read", "bash"]]);
+		expect(calls.setActiveTools).toEqual([["read", "bash", "mcp_coord", "ext_extra"]]);
 		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
 		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
 		expect(calls.setThinkingLevel).toHaveLength(1);
@@ -376,7 +385,19 @@ describe("before_agent_start", () => {
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
+	});
+
+	it("preserves non-builtin (MCP/extension) tools alongside the profile's built-in allowlist", async () => {
+		writeProfile("p", { tools: ["read"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		// listed built-in (read) kept; unlisted built-ins (bash/edit/write/grep/find/ls) dropped;
+		// non-builtin tools (mcp_coord, ext_extra) preserved — not filtered out by the allowlist.
+		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
 	});
 
 	it("warns when the model is not found in the registry", async () => {
@@ -682,7 +703,7 @@ describe("second-pass review coverage", () => {
 		await runApplySessionStart(handlers, ctx);
 		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx) as BeforeAgentStartEventResult;
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
 		expect(r.systemPrompt).toContain("sp");
 	});
 });
@@ -915,7 +936,7 @@ describe("CLI flag overrides (profile = default, explicit flags win)", () => {
 		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
 		expect(calls.setModel).toHaveLength(0);
 		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(calls.setActiveTools).toEqual([["read", "mcp_coord", "ext_extra"]]);
 	});
 
 	it("--thinking explicit skips profile thinking but still applies model", async () => {

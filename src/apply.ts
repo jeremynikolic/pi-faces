@@ -109,7 +109,8 @@ export class ProfileApplier {
 		const tools = profile.tools;
 		if (tools && tools.length > 0 && !cliFlagProvided("tools", "t")) {
 			try {
-				const known = new Set(this.pi.getAllTools().map((t) => t.name));
+				const all = this.pi.getAllTools();
+				const known = new Set(all.map((t) => t.name));
 				const knownTools = tools.filter((t) => known.has(t));
 				const unknown = tools.filter((t) => !known.has(t));
 				if (unknown.length > 0) {
@@ -117,12 +118,18 @@ export class ProfileApplier {
 						"[pi-agent-profiles] Unknown tool(s) in profile, ignored: " + unknown.join(", ")
 					);
 				}
+				// A profile's `tools` list scopes BUILT-IN tools only. Preserve all
+				// non-builtin tools (MCP servers, extensions, custom) so a profile's
+				// built-in allowlist never filters out non-builtin capabilities (MCP, extensions, custom).
+				const nonBuiltin = all
+					.filter((t) => t.sourceInfo?.source !== "builtin")
+					.map((t) => t.name);
 				// Guard against disabling every tool: if the profile listed only
 				// unknown tools, leave the active tool set unchanged.
 				if (knownTools.length === 0) {
 					console.warn("[pi-agent-profiles] No known tools in profile; tool set unchanged");
 				} else {
-					this.pi.setActiveTools([...new Set(knownTools)]);
+					this.pi.setActiveTools([...new Set([...knownTools, ...nonBuiltin])]);
 				}
 			} catch (err) {
 				console.warn("[pi-agent-profiles] Failed to set tools: " + err);

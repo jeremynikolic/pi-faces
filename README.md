@@ -120,6 +120,19 @@ Skills with `disable-model-invocation: true` in their frontmatter are **user-onl
 
 Unknown fields are reported as a warning (catches typos).
 
+### 💡 Tips & tricks — a clean, scoped agent profile
+
+For a tightly-scoped autonomous agent (a team worker, a one-off spawn) that should see **only** its curated skills — not every skill on disk — combine the two:
+
+1. **Curate the `skills` array** in the profile — list only the skills that role should invoke.
+2. **Pass `--no-skills` on the spawn** (`pi --profile <name> --no-skills`) — disables pi's global skill discovery.
+
+**Result:** the agent loads *only* the skills you listed — nothing else. Smaller context, no skill noise, no accidental invocations of unrelated skills. This is the per-profile hard cherry-pick.
+
+Without `--no-skills`, the `skills` array is **additive** (every skill in `~/.pi/skills` loads too). That's the right default for *interactive* sessions where you want the full slash-command palette available — but the wrong choice for a *bounded autonomous worker* where unrelated skills are distractions + context bloat.
+
+**Omit `disable-model-invocation: true` (user-only) skills** from a scoped profile's `skills` list — an autonomous agent can't invoke them, so they're dead weight even in a cherry-pick.
+
 ## Managing Profiles
 
 Use the `/profiles` command inside a pi session:

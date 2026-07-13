@@ -7,6 +7,7 @@ export interface Profile {
 	model?: string;
 	thinking?: string;
 	tools?: string[];
+	skills?: string[];
 	system_prompt?: string;
 	replace_system_prompt?: boolean;
 }

@@ -42,6 +42,7 @@ export default function (pi: ExtensionAPI) {
 	const applier = new ProfileApplier(pi);
 	pi.on("session_start", (event, ctx) => applier.handleSessionStart(event, ctx));
 	pi.on("before_agent_start", (event, ctx) => applier.handleBeforeAgentStart(event, ctx));
+	pi.on("resources_discover", (event, ctx) => applier.handleResourcesDiscover(event, ctx));
 
 	// Prefix the session display name with [profile] while a profile is active.
 	new SessionNamePrefix(pi).register();

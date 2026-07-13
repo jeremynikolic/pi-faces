@@ -7,6 +7,9 @@ import type {
 import { profilesDir } from "./paths.ts";
 import { isValidProfileName, readProfile, resolveSystemPrompt } from "./profile.ts";
 import { cliFlagProvided } from "./cli.ts";
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * Applies the active profile.
@@ -159,6 +162,30 @@ export class ProfileApplier {
 			return { systemPrompt };
 		}
 		return { systemPrompt: event.systemPrompt + "\n\n" + systemPrompt };
+	}
+
+	/** Contribute the profile's curated skill paths (cherry-pick via resources_discover). */
+	handleResourcesDiscover(
+		_event: { cwd: string; reason: string },
+		_ctx: ExtensionContext
+	): { skillPaths?: string[] } | undefined {
+		const profileName = this.profileName();
+		if (!profileName) return undefined;
+		const result = readProfile(profileName);
+		if (!result.ok) return undefined;
+		const skills = result.profile.skills;
+		if (!skills || skills.length === 0) return undefined;
+		const skillPaths: string[] = [];
+		for (const name of skills) {
+			const p = path.join(os.homedir(), ".pi", "skills", name);
+			if (existsSync(p)) {
+				skillPaths.push(p);
+			} else {
+				console.warn("[pi-agent-profiles] skill not found, skipping: " + name + " (" + p + ")");
+			}
+		}
+		if (skillPaths.length === 0) return undefined;
+		return { skillPaths };
 	}
 }
 

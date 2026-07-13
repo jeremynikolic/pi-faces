@@ -25,6 +25,7 @@ const KNOWN_FIELDS = new Set([
 	"model",
 	"thinking",
 	"tools",
+	"skills",
 	"system_prompt",
 	"replace_system_prompt",
 ]);

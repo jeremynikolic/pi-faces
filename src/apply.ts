@@ -43,7 +43,7 @@ export class ProfileApplier {
 		const name = typeof flag === "string" ? flag : String(flag);
 		if (!isValidProfileName(name)) {
 			if (!this.profileIssueWarned) {
-				console.warn("[pi-agent-profiles] Invalid profile name: \"" + name + "\"");
+				console.warn("[pi-faces] Invalid profile name: \"" + name + "\"");
 				this.profileIssueWarned = true;
 			}
 			return undefined;
@@ -53,7 +53,7 @@ export class ProfileApplier {
 
 	private warnOnce(message: string): void {
 		if (!this.profileIssueWarned) {
-			console.warn("[pi-agent-profiles] " + message);
+			console.warn("[pi-faces] " + message);
 			this.profileIssueWarned = true;
 		}
 	}
@@ -79,7 +79,7 @@ export class ProfileApplier {
 
 		// Warn once on unknown fields (typos).
 		for (const w of result.warnings) {
-			console.warn("[pi-agent-profiles] " + w);
+			console.warn("[pi-faces] " + w);
 		}
 
 		// Eager prompt-file validation + cache. Reject the whole profile if
@@ -121,7 +121,7 @@ export class ProfileApplier {
 		if (!modelExplicit) {
 			if ((provider && !modelId) || (modelId && !provider)) {
 				console.warn(
-					"[pi-agent-profiles] profile \"" + profileName + "\": provider and model must both be set to change the model"
+					"[pi-faces] profile \"" + profileName + "\": provider and model must both be set to change the model"
 				);
 			} else if (provider && modelId && ctx.modelRegistry) {
 				const model = ctx.modelRegistry.find(provider, modelId);
@@ -129,13 +129,13 @@ export class ProfileApplier {
 					try {
 						const ok = await this.pi.setModel(model);
 						if (!ok) {
-							console.warn("[pi-agent-profiles] No API key for " + provider + "/" + modelId);
+							console.warn("[pi-faces] No API key for " + provider + "/" + modelId);
 						}
 					} catch (err) {
-						console.warn("[pi-agent-profiles] Failed to set model: " + err);
+						console.warn("[pi-faces] Failed to set model: " + err);
 					}
 				} else {
-					console.warn("[pi-agent-profiles] Model not found: " + provider + "/" + modelId);
+					console.warn("[pi-faces] Model not found: " + provider + "/" + modelId);
 				}
 			}
 		}
@@ -146,7 +146,7 @@ export class ProfileApplier {
 			try {
 				this.pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
 			} catch (err) {
-				console.warn("[pi-agent-profiles] Failed to set thinking level: " + err);
+				console.warn("[pi-faces] Failed to set thinking level: " + err);
 			}
 		}
 	}
@@ -190,7 +190,7 @@ export class ProfileApplier {
 				if (existsSync(p)) {
 					skillPaths.push(p);
 				} else {
-					console.warn("[pi-agent-profiles] skill not found, skipping: " + entry + " (" + p + ")");
+					console.warn("[pi-faces] skill not found, skipping: " + entry + " (" + p + ")");
 				}
 			}
 			if (skillPaths.length === 0) return undefined;

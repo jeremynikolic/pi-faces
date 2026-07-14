@@ -54,7 +54,7 @@ function tightenStorageModes(dir: string): void {
 }
 
 /**
- * pi-agent-profiles extension entry point.
+ * pi-faces extension entry point.
  *
  * Seeds default profiles on first run, registers the `--profile` flag, applies
  * the active profile before each agent start, prefixes the session name while a

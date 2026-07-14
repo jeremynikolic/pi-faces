@@ -1,10 +1,10 @@
-# pi-agent-profiles
+# pi-faces
 
 <p align="center">
-  <img src="art/banner.png" alt="pi-agent-profiles" width="1280">
+  <img src="art/banner.png" alt="pi-faces" width="1280">
 </p>
 
-Agent profiles for `pi` — bundle a short description, model, provider, thinking level, tools, and system prompt into a named JSON file, selected via `--profile <name>`. Managed with the `/profiles` slash command.
+**Faces** your agent can wear — each *face* is a named JSON profile bundling a short description, model, provider, thinking level, tools, and system prompt, selected via `--profile <name>`. Managed with the `/profiles` slash command. (Storage dir `~/.pi/agent-profiles/` is unchanged from the earlier `pi-agent-profiles` release, so existing profiles keep working.)
 
 ## Features
 
@@ -20,13 +20,13 @@ Agent profiles for `pi` — bundle a short description, model, provider, thinkin
 ## Install
 
 ```bash
-pi install npm:pi-agent-profiles
+pi install npm:pi-faces
 ```
 
 Or from source:
 
 ```bash
-pi install ./pi-agent-profiles
+pi install ./pi-faces
 ```
 
 ## Usage

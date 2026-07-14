@@ -1,5 +1,5 @@
 {
-  "name": "pi-agent-profiles",
+  "name": "pi-faces",
   "version": "0.1.0",
   "description": "Agent profiles for pi: bundle description, model, provider, thinking, tools, and system prompt into a named unit selected via --profile",
   "keywords": [
@@ -12,7 +12,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/jeremynikolic/pi-agent-profiles/main/art/preview.png"
+    "image": "https://raw.githubusercontent.com/jeremynikolic/pi-faces/main/art/preview.png"
   },
   "scripts": {
     "test": "vitest run",

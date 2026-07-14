@@ -50,13 +50,13 @@ export class SessionNamePrefix {
 		const result = readConfigFile();
 		if (!result.ok) {
 			if (!this.configIssueWarned) {
-				console.warn("[pi-agent-profiles] " + result.error);
+				console.warn("[pi-faces] " + result.error);
 				this.configIssueWarned = true;
 			}
 			return true; // default on when config is unreadable
 		}
 		if (!this.configIssueWarned && result.warnings.length > 0) {
-			for (const w of result.warnings) console.warn("[pi-agent-profiles] " + w);
+			for (const w of result.warnings) console.warn("[pi-faces] " + w);
 			this.configIssueWarned = true;
 		}
 		const v = result.config.prefix_session_name;

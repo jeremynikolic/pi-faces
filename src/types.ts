@@ -1,4 +1,4 @@
-// Shared types for pi-agent-profiles.
+// Shared types for pi-faces.
 
 /** A profile JSON file. All fields optional — omit a field and pi keeps its default. */
 export interface Profile {

@@ -69,7 +69,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 				case "rename":
 					return cmdRename(parts[1], parts[2], ctx);
 				default:
-					ctx.ui.notify("[pi-agent-profiles] Unknown subcommand: " + sub, "warning");
+					ctx.ui.notify("[pi-faces] Unknown subcommand: " + sub, "warning");
 					ctx.ui.notify(
 						"Usage: /profiles [list|show <name>|new <name>|edit <name>|delete <name>|rename <old> <new>]",
 						"info"
@@ -85,7 +85,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		const profiles = listProfiles();
 		if (profiles.length === 0) {
 			pi.sendMessage({
-				customType: "pi-agent-profiles",
+				customType: "pi-faces",
 				content: "No profiles found in " + dir,
 				display: true,
 			});
@@ -98,7 +98,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		const body =
 			"Profiles in " + dir + " (" + profiles.length + "):\n\n" + lines.join("\n");
 		pi.sendMessage({
-			customType: "pi-agent-profiles",
+			customType: "pi-faces",
 			content: body,
 			display: true,
 		});
@@ -111,11 +111,11 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		}
 		const raw = readProfileRaw(name);
 		if (!raw.ok) {
-			ctx.ui.notify("[pi-agent-profiles] No profile: " + name, "warning");
+			ctx.ui.notify("[pi-faces] No profile: " + name, "warning");
 			return;
 		}
 		pi.sendMessage({
-			customType: "pi-agent-profiles",
+			customType: "pi-faces",
 			content: "Profile " + name + ":\n\n```json\n" + raw.content.trim() + "\n```",
 			display: true,
 		});
@@ -129,7 +129,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		const file = profilePath(name);
 		if (existsSync(file)) {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("[pi-agent-profiles] Profile already exists: " + name, "warning");
+				ctx.ui.notify("[pi-faces] Profile already exists: " + name, "warning");
 				return;
 			}
 			const overwrite = await ctx.ui.confirm(
@@ -148,10 +148,10 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 			mkdirSync(profilesDir(), { recursive: true });
 			atomicWrite(file, defaultScaffold(description));
 		} catch (err) {
-			ctx.ui.notify("[pi-agent-profiles] Failed to create profile: " + err, "error");
+			ctx.ui.notify("[pi-faces] Failed to create profile: " + err, "error");
 			return;
 		}
-		ctx.ui.notify("[pi-agent-profiles] Created " + file, "info");
+		ctx.ui.notify("[pi-faces] Created " + file, "info");
 
 		if (ctx.hasUI) {
 			const doEdit = await ctx.ui.confirm("Edit now?", "Open editor for " + name + "?");
@@ -165,7 +165,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 			return;
 		}
 		if (!existsSync(profilePath(name))) {
-			ctx.ui.notify("[pi-agent-profiles] No profile: " + name, "warning");
+			ctx.ui.notify("[pi-faces] No profile: " + name, "warning");
 			return;
 		}
 		await editInEditor(name, ctx);
@@ -173,12 +173,12 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 
 	async function editInEditor(name: string, ctx: ExtensionCommandContext) {
 		if (!ctx.hasUI) {
-			ctx.ui.notify("[pi-agent-profiles] edit requires an interactive session", "warning");
+			ctx.ui.notify("[pi-faces] edit requires an interactive session", "warning");
 			return;
 		}
 		const raw = readProfileRaw(name);
 		if (!raw.ok) {
-			ctx.ui.notify("[pi-agent-profiles] No profile: " + name, "warning");
+			ctx.ui.notify("[pi-faces] No profile: " + name, "warning");
 			return;
 		}
 		const edited = await ctx.ui.editor("Edit " + name, raw.content);
@@ -198,10 +198,10 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		try {
 			atomicWrite(profilePath(name), edited);
 		} catch (err) {
-			ctx.ui.notify("[pi-agent-profiles] Failed to save profile: " + err, "error");
+			ctx.ui.notify("[pi-faces] Failed to save profile: " + err, "error");
 			return;
 		}
-		ctx.ui.notify("[pi-agent-profiles] Saved " + name, "info");
+		ctx.ui.notify("[pi-faces] Saved " + name, "info");
 	}
 
 	async function cmdDelete(name: string | undefined, ctx: ExtensionCommandContext) {
@@ -211,12 +211,12 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		}
 		const file = profilePath(name);
 		if (!existsSync(file)) {
-			ctx.ui.notify("[pi-agent-profiles] No profile: " + name, "warning");
+			ctx.ui.notify("[pi-faces] No profile: " + name, "warning");
 			return;
 		}
 		if (!ctx.hasUI) {
 			ctx.ui.notify(
-				"[pi-agent-profiles] delete requires confirmation; use an interactive session",
+				"[pi-faces] delete requires confirmation; use an interactive session",
 				"warning"
 			);
 			return;
@@ -226,7 +226,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		try {
 			unlinkSync(file);
 		} catch (err) {
-			ctx.ui.notify("[pi-agent-profiles] Failed to delete profile: " + err, "error");
+			ctx.ui.notify("[pi-faces] Failed to delete profile: " + err, "error");
 			return;
 		}
 
@@ -240,20 +240,20 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 				try {
 					rmSync(sib, { recursive: true, force: true });
 					ctx.ui.notify(
-						"[pi-agent-profiles] Removed " + name + "/ and " + name + ".json",
+						"[pi-faces] Removed " + name + "/ and " + name + ".json",
 						"info"
 					);
 					return;
 				} catch (err) {
 					ctx.ui.notify(
-						"[pi-agent-profiles] Deleted " + name + ".json but failed to remove " + name + "/: " + err,
+						"[pi-faces] Deleted " + name + ".json but failed to remove " + name + "/: " + err,
 						"warning"
 					);
 					return;
 				}
 			}
 		}
-		ctx.ui.notify("[pi-agent-profiles] Deleted " + name, "info");
+		ctx.ui.notify("[pi-faces] Deleted " + name, "info");
 	}
 
 	async function cmdRename(
@@ -268,13 +268,13 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		const fromFile = profilePath(from);
 		const toFile = profilePath(to);
 		if (!existsSync(fromFile)) {
-			ctx.ui.notify("[pi-agent-profiles] No profile: " + from, "warning");
+			ctx.ui.notify("[pi-faces] No profile: " + from, "warning");
 			return;
 		}
 		const toExisted = existsSync(toFile);
 		if (toExisted) {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("[pi-agent-profiles] target exists: " + to, "warning");
+				ctx.ui.notify("[pi-faces] target exists: " + to, "warning");
 				return;
 			}
 			const overwrite = await ctx.ui.confirm("Target exists", "Overwrite " + to + "?");
@@ -290,7 +290,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		const hasSib = existsSync(fromDir) && statSync(fromDir).isDirectory();
 		if (hasSib && existsSync(toDir)) {
 			ctx.ui.notify(
-				"[pi-agent-profiles] target directory exists: " + to + "/ — rename aborted (cannot merge directories)",
+				"[pi-faces] target directory exists: " + to + "/ — rename aborted (cannot merge directories)",
 				"warning"
 			);
 			return;
@@ -299,7 +299,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		try {
 			renameSync(fromFile, toFile);
 		} catch (err) {
-			ctx.ui.notify("[pi-agent-profiles] Failed to rename profile: " + err, "error");
+			ctx.ui.notify("[pi-faces] Failed to rename profile: " + err, "error");
 			return;
 		}
 
@@ -317,7 +317,7 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 					}
 				}
 				ctx.ui.notify(
-					"[pi-agent-profiles] Renamed profile but could not move directory " +
+					"[pi-faces] Renamed profile but could not move directory " +
 						from +
 						"/: " + err,
 					"warning"
@@ -325,6 +325,6 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 				return;
 			}
 		}
-		ctx.ui.notify("[pi-agent-profiles] Renamed " + from + " → " + to, "info");
+		ctx.ui.notify("[pi-faces] Renamed " + from + " → " + to, "info");
 	}
 }

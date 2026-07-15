@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-/** Default profiles seeded into ~/.pi/agent-profiles on first run. */
+/** Default profiles seeded into ~/.pi/faces on first run. */
 export const DEFAULT_PROFILES: Record<string, object> = {
 	planner: {
 		description:

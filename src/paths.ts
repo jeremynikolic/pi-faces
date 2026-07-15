@@ -1,10 +1,34 @@
 import os from "node:os";
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync, renameSync } from "node:fs";
 
-const DEFAULT_PROFILES_DIR = "~/.pi/agent-profiles";
+const DEFAULT_PROFILES_DIR = "~/.pi/faces";
+const LEGACY_PROFILES_DIR = "~/.pi/agent-profiles";
 
+let migrated = false;
 let cachedRealProfilesRoot: string | undefined;
+
+/**
+ * One-time migration from the legacy `~/.pi/agent-profiles` dir to `~/.pi/faces`.
+ * Only runs when `PI_PROFILES_DIR` is NOT set (using the default) AND the new dir
+ * doesn't exist AND the legacy dir does — renames legacy → new so existing
+ * profiles keep working. Idempotent (guarded by `migrated`).
+ */
+function migrateLegacyProfilesDir(): void {
+	if (migrated) return;
+	migrated = true;
+	if (typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) return;
+	const legacy = expandTilde(LEGACY_PROFILES_DIR);
+	const next = expandTilde(DEFAULT_PROFILES_DIR);
+	if (!existsSync(next) && existsSync(legacy)) {
+		try {
+			renameSync(legacy, next);
+		} catch {
+			// rename failed (cross-device / permissions) — leave legacy in place;
+			// the user can move it manually.
+		}
+	}
+}
 
 /** Expand a leading `~/` to the user's home directory. */
 export function expandTilde(p: string): string {
@@ -16,6 +40,7 @@ export function expandTilde(p: string): string {
 
 /** Resolve the profiles directory, honoring the PI_PROFILES_DIR env override. */
 export function profilesDir(): string {
+	migrateLegacyProfilesDir();
 	return expandTilde(
 		(typeof process !== "undefined" && process.env && process.env.PI_PROFILES_DIR) ||
 			DEFAULT_PROFILES_DIR

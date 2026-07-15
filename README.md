@@ -4,7 +4,7 @@
   <img src="art/banner.png" alt="pi-faces" width="1280">
 </p>
 
-**Faces** your agent can wear — each *face* is a named JSON profile bundling a short description, model, provider, thinking level, tools, and system prompt, selected via `--profile <name>`. Managed with the `/profiles` slash command. (Storage dir `~/.pi/agent-profiles/` is unchanged from the earlier `pi-agent-profiles` release, so existing profiles keep working.)
+**Faces** your agent can wear — each *face* is a named JSON profile bundling a short description, model, provider, thinking level, tools, and system prompt, selected via `--profile <name>`. Managed with the `/profiles` slash command. (Storage dir `~/.pi/faces/`. On first run after upgrading from the earlier `pi-agent-profiles` release, the extension auto-migrates `~/.pi/agent-profiles/` → `~/.pi/faces/` so existing profiles keep working — unless `PI_PROFILES_DIR` is set, in which case your override is used as-is.)
 
 ## Features
 
@@ -14,7 +14,7 @@
 - **Per-session application**: Model, thinking, and tools applied once per session; system prompt applied every turn.
 - **Prompt modes**: Append to or replace pi's built-in system prompt (`replace_system_prompt`).
 - **Session name prefix**: Active profile tags the session name so sessions group in `/resume` and `pi -r`.
-- **Seeded defaults**: `planner`, `coder`, and `reviewer` are written into `~/.pi/agent-profiles/` automatically on first run.
+- **Seeded defaults**: `planner`, `coder`, and `reviewer` are written into `~/.pi/faces/` automatically on first run.
 - **Graceful defaults**: Omit any field and `pi` keeps its default; unknown tool names reject profile application; unknown fields are warned.
 
 ## Install
@@ -43,14 +43,14 @@ Inside a pi session, use `/profiles` to manage profiles (see below).
 
 ## Profile Directory
 
-Profiles live in `~/.pi/agent-profiles/<name>.json`:
+Profiles live in `~/.pi/faces/<name>.json`:
 
 ```bash
-mkdir -p ~/.pi/agent-profiles
-ls ~/.pi/agent-profiles/*.json
+mkdir -p ~/.pi/faces
+ls ~/.pi/faces/*.json
 ```
 
-Override the directory with the `PI_PROFILES_DIR` environment variable (default: `~/.pi/agent-profiles`).
+Override the directory with the `PI_PROFILES_DIR` environment variable (default: `~/.pi/faces`).
 
 ## Profile Format
 
@@ -156,7 +156,7 @@ Behavior notes:
 
 ## Default Profiles
 
-Three ready-made profiles — `planner`, `coder`, and `reviewer` — are seeded into `~/.pi/agent-profiles/` automatically on first run (after `pi install`). Seeding is idempotent: it runs only once per directory (tracked by a `.defaults-seeded` marker) and never overwrites an existing file, so your edits and deletions stick. If you override `PI_PROFILES_DIR`, seeding is skipped — you own that directory.
+Three ready-made profiles — `planner`, `coder`, and `reviewer` — are seeded into `~/.pi/faces/` automatically on first run (after `pi install`). Seeding is idempotent: it runs only once per directory (tracked by a `.defaults-seeded` marker) and never overwrites an existing file, so your edits and deletions stick. If you override `PI_PROFILES_DIR`, seeding is skipped — you own that directory.
 
 | Profile | Model | Purpose |
 |---|---|---|
@@ -186,8 +186,8 @@ pi --profile planner --name "Refactor auth module"
 This applies to names set via `--name`, `/name`, or RPC `setSessionName()`. The prefix is **enabled by default** and controlled by a JSON config file:
 
 ```bash
-mkdir -p ~/.pi/agent-profiles/config
-echo '{"prefix_session_name": false}' > ~/.pi/agent-profiles/config/config.json
+mkdir -p ~/.pi/faces/config
+echo '{"prefix_session_name": false}' > ~/.pi/faces/config/config.json
 ```
 
 | Config field | Type | Default | Effect |

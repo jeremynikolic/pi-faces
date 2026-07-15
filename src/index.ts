@@ -75,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 	// Register the --profile CLI flag
 	pi.registerFlag("profile", {
 		type: "string",
-		description: "Agent profile name (loads ~/.pi/agent-profiles/<name>.json)",
+		description: "Agent profile name (loads ~/.pi/faces/<name>.json)",
 	});
 
 	// Apply the profile: model/thinking/tools once at session start (so the

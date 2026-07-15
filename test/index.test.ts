@@ -1440,7 +1440,7 @@ describe("tightenStorageModes", () => {
 		const calls = makeCalls();
 		const { pi } = makePi(calls, new Map());
 		factory(pi);
-		const expectedDir = join(home, ".pi", "agent-profiles");
+		const expectedDir = join(home, ".pi", "faces");
 		expect(existsSync(expectedDir)).toBe(true);
 		expect((lstatSync(expectedDir).mode & 0o777).toString(8)).toBe("700");
 		for (const name of ["planner.json", "coder.json", "reviewer.json", ".defaults-seeded"]) {

@@ -53,7 +53,7 @@ export function readConfigFile(): ReadConfigResult {
 	const file = configPath();
 	const bounded = readBoundedFile(file, MAX_CONFIG_BYTES, "config");
 	if (!bounded.ok) {
-		return { ok: false, error: bounded.error };
+		return { ok: false, error: bounded.error, code: bounded.code };
 	}
 	return parseConfigFile(bounded.content, file);
 }

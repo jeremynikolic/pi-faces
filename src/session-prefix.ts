@@ -49,7 +49,9 @@ export class SessionNamePrefix {
 	private prefixEnabled(): boolean {
 		const result = readConfigFile();
 		if (!result.ok) {
-			if (!this.configIssueWarned) {
+			// ENOENT = no config file; defaults apply silently (prefix on), as
+			// documented. Only warn on genuine read/parse failures.
+			if (result.code !== "ENOENT" && !this.configIssueWarned) {
 				console.warn("[pi-faces] " + result.error);
 				this.configIssueWarned = true;
 			}

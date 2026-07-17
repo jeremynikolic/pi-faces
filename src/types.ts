@@ -29,7 +29,7 @@ export type ParseConfigResult =
 
 export type ReadConfigResult =
 	| { ok: true; config: PackageConfig; warnings: string[] }
-	| { ok: false; error: string };
+	| { ok: false; error: string; code?: string };
 
 export type ReadProfileResult =
 	| { ok: true; profile: Profile; warnings: string[] }

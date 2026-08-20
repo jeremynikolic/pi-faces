@@ -22,13 +22,16 @@ import type {
 	BeforeAgentStartEventResult,
 } from "@earendil-works/pi-coding-agent";
 import factory, {
-	readSystemPromptFile,
+	resolvePromptValue,
 	isValidProfileName,
 	parseProfileFile,
 	parseConfigFile,
 	hasProfilePrefix,
 	withProfilePrefix,
 	parseModelRef,
+	readBoundedFile,
+	THINKING_LEVELS,
+	SUPPORTED_PROFILE_KEYS,
 	type Profile,
 	type PackageConfig,
 } from "../src/index.ts";
@@ -38,9 +41,8 @@ import {
 	MAX_PROMPT_FILE_PATH_LENGTH,
 	MAX_PROFILE_JSON_BYTES,
 	MAX_CONFIG_BYTES,
-	MAX_TOOLS_ENTRIES,
-	MAX_TOOL_NAME_LENGTH,
-	MAX_SKILLS_ENTRIES,
+	MAX_TOOLS_STRING_LENGTH,
+	MAX_SKILL_ENTRIES,
 	MAX_SKILL_ENTRY_LENGTH,
 } from "../src/limits.ts";
 import { resetRealProfilesRoot, realProfilesRoot } from "../src/paths.ts";
@@ -96,14 +98,7 @@ interface PiCalls {
 	setSessionName: string[];
 }
 
-// Generic event handler shape — the same mock stores handlers for every event
-// (before_agent_start, session_start, session_info_changed, ...).
 type AnyHandler = (event: any, ctx: ExtensionContext) => unknown;
-
-type BeforeAgentHandler = (
-	event: BeforeAgentStartEvent,
-	ctx: ExtensionContext
-) => Promise<BeforeAgentStartEventResult | void> | BeforeAgentStartEventResult | void;
 
 function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 	const handlers = new Map<string, AnyHandler[]>();
@@ -116,12 +111,9 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		{ name: "grep", sourceInfo: { source: "builtin" } },
 		{ name: "find", sourceInfo: { source: "builtin" } },
 		{ name: "ls", sourceInfo: { source: "builtin" } },
-		// Non-builtin tools (MCP/extension) must be preserved by a profile's built-in allowlist.
 		{ name: "mcp_coord", sourceInfo: { source: "mcp" } },
 		{ name: "ext_extra", sourceInfo: { source: "extension" } },
 	];
-	// Mutable session name state so getSessionName/setSessionName round-trip like
-	// the real SessionManager: setSessionName updates it, getSessionName reads it.
 	let sessionName: string | undefined;
 
 	const pi = {
@@ -153,9 +145,6 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		pi,
 		handlers,
 		command: (name: string) => commands.get(name),
-		// Seed the session name state without recording a setSessionName call,
-		// simulating startup --name which is written to the file before any
-		// extension event fires.
 		setSessionNameState: (name: string | undefined) => {
 			sessionName = name;
 		},
@@ -209,13 +198,11 @@ function sessionStartEvent() {
 	return { type: "session_start" } as unknown as BeforeAgentStartEvent;
 }
 
-/** Run the applier's session_start handler (model/thinking/tools). */
 async function runApplySessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
 	const h = handlers.get("session_start")?.[0];
 	if (h) await h(sessionStartEvent(), ctx);
 }
 
-/** Run ALL session_start handlers the way pi does (applier + prefix). */
 async function runSessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
 	for (const h of handlers.get("session_start") ?? []) {
 		await h(sessionStartEvent(), ctx);
@@ -261,6 +248,18 @@ function writeConfig(config: PackageConfig): void {
 	writeFileSync(join(dir, "config", "config.json"), JSON.stringify(config));
 }
 
+function withArgv(argv: string[], fn: () => Promise<void> | void): Promise<void> {
+	const original = process.argv;
+	process.argv = argv;
+	return (async () => {
+		try {
+			await fn();
+		} finally {
+			process.argv = original;
+		}
+	})();
+}
+
 // --- pure helpers -----------------------------------------------------------
 
 describe("isValidProfileName", () => {
@@ -272,116 +271,226 @@ describe("isValidProfileName", () => {
 			expect(isValidProfileName(bad as string | undefined)).toBe(false);
 		}
 	});
+	it("rejects whitespace", () => {
+		expect(isValidProfileName("my profile")).toBe(false);
+		expect(isValidProfileName("a\tb")).toBe(false);
+		expect(isValidProfileName("a\nb")).toBe(false);
+	});
 });
 
-describe("parseProfileFile", () => {
-	it("accepts a valid profile object", () => {
-		const r = parseProfileFile('{"description":"d","provider":"anthropic","model":"x","thinking":"high","tools":["read"]}', "f.json");
+// --- schema + strict whitelist ----------------------------------------------
+
+describe("parseProfileFile schema", () => {
+	it("accepts a valid profile with every supported key", () => {
+		const r = parseProfileFile(
+			JSON.stringify({
+				description: "d",
+				model: "ollama-cloud/glm-5.2:high",
+				provider: "ignored",
+				thinking: "high",
+				tools: "read, bash",
+				skill: ["qmd"],
+				"system-prompt": "replace",
+				"append-system-prompt": "append",
+			}),
+			"f.json"
+		);
 		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.warnings).toHaveLength(0);
 	});
+
+	it("deduplicates skill entries in first-seen order", () => {
+		const r = parseProfileFile('{"skill":["a","a","b","A"]}', "f.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.profile.skill).toEqual(["a", "b", "A"]);
+	});
+
 	it("rejects non-object JSON", () => {
 		for (const c of ["[]", "null", '"hi"', "42"]) {
 			expect(parseProfileFile(c, "f.json").ok).toBe(false);
 		}
 	});
-	it("rejects invalid field types", () => {
-		expect(parseProfileFile('{"description":5}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"tools":"read"}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"tools":[1]}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"thinking":"nope"}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"replace_system_prompt":"yes"}', "f.json").ok).toBe(false);
-	});
+
 	it("rejects invalid JSON", () => {
 		expect(parseProfileFile("{not json", "f.json").ok).toBe(false);
 	});
-	it("treats null fields as absent", () => {
-		expect(parseProfileFile('{"tools":null,"thinking":null,"provider":null}', "f.json").ok).toBe(true);
+
+	it("rejects null values", () => {
+		for (const key of Array.from(SUPPORTED_PROFILE_KEYS)) {
+			const obj: Record<string, unknown> = {};
+			obj[key] = null;
+			expect(parseProfileFile(JSON.stringify(obj), "f.json").ok).toBe(false);
+		}
 	});
-	it("warns on unknown keys (typos)", () => {
-		const r = parseProfileFile('{"system_promt":"x"}', "f.json");
+
+	it("rejects wrong field types", () => {
+		expect(parseProfileFile('{"description":5}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"tools":["read"]}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"skill":"x"}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"thinking":"nope"}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"system-prompt":[]}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"append-system-prompt":true}', "f.json").ok).toBe(false);
+	});
+
+	it("rejects over-long fields", () => {
+		expect(
+			parseProfileFile('{"description":"' + "x".repeat(MAX_INLINE_PROMPT_LENGTH + 1) + '"}', "f.json").ok
+		).toBe(false);
+		expect(
+			parseProfileFile('{"tools":"' + "x".repeat(MAX_TOOLS_STRING_LENGTH + 1) + '"}', "f.json").ok
+		).toBe(false);
+		expect(
+			parseProfileFile('{"skill":["' + "x".repeat(MAX_SKILL_ENTRY_LENGTH + 1) + '"]}', "f.json").ok
+		).toBe(false);
+		expect(
+			parseProfileFile(
+				'{"skill":' + JSON.stringify(Array(MAX_SKILL_ENTRIES + 1).fill("s")) + "}",
+				"f.json"
+			).ok
+		).toBe(false);
+	});
+
+	it("rejects legacy and unknown keys, naming the supported set", () => {
+		for (const bad of [
+			"skills",
+			"system_prompt",
+			"system_prompt_file",
+			"replace_system_prompt",
+			"no-skills",
+			"theme",
+			"name",
+			"profile",
+			"typo",
+		]) {
+			const r = parseProfileFile(JSON.stringify({ [bad]: "x" }), "f.json");
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error).toContain(bad);
+				expect(r.error).toContain(Array.from(SUPPORTED_PROFILE_KEYS).join(", "));
+			}
+		}
+	});
+
+	it("rejects a recursive profile key", () => {
+		const r = parseProfileFile('{"profile":"nested"}', "f.json");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("profile");
+	});
+
+	it("allows both prompt keys together", () => {
+		const r = parseProfileFile(
+			'{"system-prompt":"r","append-system-prompt":"a"}',
+			"f.json"
+		);
 		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.warnings).toContain('unknown field "system_promt" in f.json (ignored)');
+		if (r.ok) expect(r.warnings).toHaveLength(0);
+	});
+
+	it("success result has no unknown-field warnings", () => {
+		const r = parseProfileFile('{"description":"x"}', "f.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.warnings).toHaveLength(0);
 	});
 });
 
-describe("readSystemPromptFile", () => {
-	it("loads an in-root regular file, trimmed", () => {
-		mkdirSync(join(dir, "planner"));
-		writeFileSync(join(dir, "planner", "sp.md"), "  file prompt  ");
-		const r = readSystemPromptFile("./planner/sp.md", dir);
+describe("parseProfileFile model/provider cross-field", () => {
+	it("packed model passes without provider", () => {
+		expect(parseProfileFile('{"model":"ollama-cloud/glm-5.2:high"}', "f.json").ok).toBe(true);
+	});
+
+	it("bare model with provider passes", () => {
+		expect(
+			parseProfileFile('{"model":"glm-5.2","provider":"ollama-cloud"}', "f.json").ok
+		).toBe(true);
+	});
+
+	it("packed model with separate provider passes (packed wins)", () => {
+		expect(
+			parseProfileFile('{"model":"ollama-cloud/glm-5.2","provider":"other"}', "f.json").ok
+		).toBe(true);
+	});
+
+	it("bare model without provider rejects", () => {
+		const r = parseProfileFile('{"model":"glm-5.2"}', "f.json");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("packed provider/id");
+	});
+
+	it("provider without model rejects", () => {
+		const r = parseProfileFile('{"provider":"ollama-cloud"}', "f.json");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("provider requires a model");
+	});
+
+	it("empty packed provider or id rejects", () => {
+		expect(parseProfileFile('{"model":"/glm-5.2"}', "f.json").ok).toBe(false);
+		expect(parseProfileFile('{"model":"ollama-cloud/"}', "f.json").ok).toBe(false);
+	});
+});
+
+// --- prompt resolver / security ---------------------------------------------
+
+describe("resolvePromptValue", () => {
+	it("returns literal strings verbatim", () => {
+		const r = resolvePromptValue("  You are…\n", dir);
 		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.content).toBe("file prompt");
+		if (r.ok) expect(r.content).toBe("  You are…\n");
 	});
 
-	it("rejects a .. segment", () => {
-		const r = readSystemPromptFile("./../escape.md", dir);
-		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("./../escape.md");
+	it("treats @foo and @ as literal", () => {
+		expect(resolvePromptValue("@role.md", dir)).toEqual({ ok: true, content: "@role.md" });
+		expect(resolvePromptValue("@", dir)).toEqual({ ok: true, content: "@" });
 	});
 
-	it("rejects an absolute path", () => {
-		const r = readSystemPromptFile("/etc/passwd", dir);
-		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("/etc/passwd");
-	});
-
-	it("rejects a tilde path", () => {
-		const r = readSystemPromptFile("~/secret", dir);
-		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("~/secret");
-	});
-
-	it("rejects an empty value", () => {
-		expect(readSystemPromptFile("", dir).ok).toBe(false);
-		expect(readSystemPromptFile(undefined, dir).ok).toBe(false);
-	});
-
-	it("follows an in-root symlink", () => {
-		mkdirSync(join(dir, "prompts"));
-		writeFileSync(join(dir, "prompts", "target.md"), "target");
-		symlinkSync(join(dir, "prompts", "target.md"), join(dir, "link.md"));
-		const r = readSystemPromptFile("./link.md", dir);
+	it("loads @./ file content verbatim, preserving whitespace and final newline", () => {
+		writeFileSync(join(dir, "role.md"), "  leading\ntrailing  \n");
+		const r = resolvePromptValue("@./role.md", dir);
 		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.content).toBe("target");
+		if (r.ok) expect(r.content).toBe("  leading\ntrailing  \n");
 	});
 
-	it("rejects a symlink that escapes the profile root", () => {
-		const external = mkdtempSync(join(tmpdir(), "piap-ext-"));
-		writeFileSync(join(external, "secret.md"), "external");
-		symlinkSync(join(external, "secret.md"), join(dir, "escape.md"));
-		const r = readSystemPromptFile("./escape.md", dir);
+	it("rejects @~/ path", () => {
+		const r = resolvePromptValue("@~/secret", dir);
 		expect(r.ok).toBe(false);
-		if (!r.ok) {
-			expect(r.error).toContain("./escape.md");
-			expect(r.error).not.toContain("external");
-		}
-		rmSync(external, { recursive: true, force: true });
+		if (!r.ok) expect(r.error).toContain("@~/secret");
 	});
 
-	it("rejects a symlink to a non-existent target", () => {
-		symlinkSync(join(dir, "missing.md"), join(dir, "dangling.md"));
-		const r = readSystemPromptFile("./dangling.md", dir);
+	it("rejects @/ absolute path", () => {
+		const r = resolvePromptValue("@/etc/passwd", dir);
 		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("@/etc/passwd");
 	});
 
-	it("rejects a directory path", () => {
+	it("rejects @./../ escape", () => {
+		const r = resolvePromptValue("@./../secret", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("@./../secret");
+	});
+
+	it("rejects missing file", () => {
+		const r = resolvePromptValue("@./missing.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("missing.md");
+	});
+
+	it("rejects a directory", () => {
 		mkdirSync(join(dir, "prompts"));
-		const r = readSystemPromptFile("./prompts", dir);
+		const r = resolvePromptValue("@./prompts", dir);
 		expect(r.ok).toBe(false);
 	});
 
-	it("rejects a FIFO at the path", () => {
+	it("rejects a FIFO", () => {
 		if (process.platform === "win32") return;
 		const fifo = join(dir, "pipe");
 		spawnSync("mkfifo", [fifo]);
-		const r = readSystemPromptFile("./pipe", dir);
+		const r = resolvePromptValue("@./pipe", dir);
 		expect(r.ok).toBe(false);
 	});
 
-	it("rejects an oversized file without reading content", () => {
+	it("rejects an oversized file without echoing content", () => {
 		const p = join(dir, "huge.md");
 		writeFileSync(p, Buffer.alloc(MAX_PROMPT_FILE_BYTES + 1, "x"));
-		const r = readSystemPromptFile("./huge.md", dir);
+		const r = resolvePromptValue("@./huge.md", dir);
 		expect(r.ok).toBe(false);
 		if (!r.ok) {
 			expect(r.error).toContain(String(MAX_PROMPT_FILE_BYTES + 1));
@@ -389,10 +498,38 @@ describe("readSystemPromptFile", () => {
 		}
 	});
 
-	it("rejects a non-existent relative path", () => {
-		const r = readSystemPromptFile("./missing.md", dir);
+	it("rejects a final-leaf symlink to an in-root file", () => {
+		mkdirSync(join(dir, "prompts"));
+		writeFileSync(join(dir, "prompts", "target.md"), "target");
+		symlinkSync(join(dir, "prompts", "target.md"), join(dir, "link.md"));
+		const r = resolvePromptValue("@./link.md", dir);
 		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("./missing.md");
+		if (!r.ok) expect(r.error).toContain("symlink");
+	});
+
+	it("rejects a final-leaf symlink that escapes the root", () => {
+		const external = mkdtempSync(join(tmpdir(), "piap-ext-"));
+		writeFileSync(join(external, "secret.md"), "external");
+		symlinkSync(join(external, "secret.md"), join(dir, "escape.md"));
+		const r = resolvePromptValue("@./escape.md", dir);
+		expect(r.ok).toBe(false);
+		if (!r.ok) {
+			expect(r.error).toContain("escape.md");
+			expect(r.error).not.toContain("external");
+		}
+		rmSync(external, { recursive: true, force: true });
+	});
+
+	it("returns originally-opened inode content after a mid-call symlink swap", () => {
+		const external = mkdtempSync(join(tmpdir(), "piap-swap-ext-"));
+		writeFileSync(join(external, "target.md"), "external");
+		writeFileSync(join(dir, "sp.md"), "good");
+		__piapMock.swapOpenSync = join(external, "target.md");
+		const r = resolvePromptValue("@./sp.md", dir);
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.content).toBe("good");
+		expect(readFileSync(join(dir, "sp.md"), "utf-8")).toBe("external");
+		rmSync(external, { recursive: true, force: true });
 	});
 
 	it("loads an in-root file when the profile root itself is a symlink", () => {
@@ -402,12 +539,13 @@ describe("readSystemPromptFile", () => {
 		symlinkSync(real, linkDir);
 		process.env.PI_PROFILES_DIR = linkDir;
 		resetRealProfilesRoot();
-		const r = readSystemPromptFile("./sp.md", realProfilesRoot());
+		const r = resolvePromptValue("@./sp.md", realProfilesRoot());
 		expect(r.ok).toBe(true);
 		if (r.ok) expect(r.content).toBe("symlinked root");
-		// .. from the symlinked root is still rejected against the real root.
-		const up = readSystemPromptFile("./../escape.md", realProfilesRoot());
+		const up = resolvePromptValue("@./../escape.md", realProfilesRoot());
 		expect(up.ok).toBe(false);
+		process.env.PI_PROFILES_DIR = dir;
+		resetRealProfilesRoot();
 		rmSync(real, { recursive: true, force: true });
 		try {
 			rmSync(linkDir, { recursive: true, force: true });
@@ -415,81 +553,77 @@ describe("readSystemPromptFile", () => {
 			// symlink to dir may need unlink
 		}
 	});
+});
 
-	it("returns the originally-opened inode content after a mid-call symlink swap (F-S1)", () => {
-		const external = mkdtempSync(join(tmpdir(), "piap-swap-ext-"));
-		writeFileSync(join(external, "target.md"), "external");
-		writeFileSync(join(dir, "sp.md"), "good");
-		__piapMock.swapOpenSync = join(external, "target.md");
-		const r = readSystemPromptFile("./sp.md", dir);
-		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.content).toBe("good");
-		// After the call the path should point at the swap target, proving the
-		// swap happened, but the returned content is from the original inode.
-		expect(readFileSync(join(dir, "sp.md"), "utf-8")).toBe("external");
-		rmSync(external, { recursive: true, force: true });
+// --- model parser -----------------------------------------------------------
+
+describe("parseModelRef", () => {
+	it("splits a packed provider/id", () => {
+		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "glm-5.2",
+			thinkingHint: undefined,
+		});
+	});
+
+	it("uses separate provider for a bare id", () => {
+		expect(parseModelRef("ollama-cloud", "glm-5.2")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "glm-5.2",
+			thinkingHint: undefined,
+		});
+	});
+
+	it("packed provider wins over separate provider", () => {
+		expect(parseModelRef("other", "ollama-cloud/glm-5.2")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "glm-5.2",
+			thinkingHint: undefined,
+		});
+	});
+
+	it("strips a recognised trailing :thinking hint", () => {
+		expect(parseModelRef("ollama-cloud", "glm-5.2:high")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "glm-5.2",
+			thinkingHint: "high",
+		});
+	});
+
+	it("treats an unrecognised trailing suffix as part of the id", () => {
+		expect(parseModelRef("ollama-cloud", "gpt-oss:20b")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "gpt-oss:20b",
+			thinkingHint: undefined,
+		});
+	});
+
+	it("handles colon-bearing id with recognised final hint", () => {
+		expect(parseModelRef(undefined, "ollama-cloud/gpt-oss:20b:low")).toEqual({
+			provider: "ollama-cloud",
+			modelId: "gpt-oss:20b",
+			thinkingHint: "low",
+		});
 	});
 });
 
-// --- before_agent_start -----------------------------------------------------
+// --- applier lifecycle / precedence -----------------------------------------
 
-describe("before_agent_start", () => {
-	it("does nothing when the flag is unset", async () => {
-		const calls = makeCalls();
-		const { pi, handlers } = makePi(calls, new Map());
-		factory(pi);
-		const r = await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(r).toBeUndefined();
-		expect(calls.setModel).toHaveLength(0);
-	});
-
-	it("rejects a path-traversal profile name once", async () => {
-		const calls = makeCalls();
-		const flags = new Map([["profile", "../other"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(calls.setModel).toHaveLength(0);
-	});
-
-	it("warns once and bails when the profile is missing", async () => {
-		const calls = makeCalls();
-		const flags = new Map([["profile", "missing"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(calls.setModel).toHaveLength(0);
-	});
-
-	it("warns once and bails when the profile JSON is invalid", async () => {
-		writeFileSync(join(dir, "bad.json"), "{not json");
-		const calls = makeCalls();
-		const flags = new Map([["profile", "bad"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(calls.setModel).toHaveLength(0);
-	});
-
-	it("applies model/thinking/tools once and appends the system prompt every turn", async () => {
+describe("session_start applier", () => {
+	it("applies model/thinking/tools once and appends prompt every turn", async () => {
 		writeProfile("planner", {
 			provider: "anthropic",
 			model: "claude-sonnet-4",
 			thinking: "high",
-			tools: ["read", "bash"],
-			system_prompt: "You are a planner.",
+			tools: "read, bash",
+			"append-system-prompt": "You are a planner.",
 		});
 		const calls = makeCalls();
 		const flags = new Map([["profile", "planner"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
-		// model/thinking/tools apply once at session start
 		await runApplySessionStart(handlers, ctx);
-		// system prompt applies every turn
 		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
 		expect(calls.setModel).toHaveLength(1);
@@ -497,11 +631,10 @@ describe("before_agent_start", () => {
 		expect(calls.setActiveTools).toEqual([["read", "bash"]]);
 		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
 		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nYou are a planner." });
-		expect(calls.setThinkingLevel).toHaveLength(1);
 	});
 
-	it("replaces the built-in prompt when replace_system_prompt is true", async () => {
-		writeProfile("p", { system_prompt: "ONLY THIS", replace_system_prompt: true });
+	it("replaces the built-in prompt with system-prompt", async () => {
+		writeProfile("p", { "system-prompt": "ONLY THIS" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
@@ -511,18 +644,148 @@ describe("before_agent_start", () => {
 		expect(r).toEqual({ systemPrompt: "ONLY THIS" });
 	});
 
-	it("warns when provider/model is only half-set and does not call setModel", async () => {
-		writeProfile("p", { provider: "anthropic" });
+	it("composes both prompt keys with exactly two newlines", async () => {
+		writeProfile("p", {
+			"system-prompt": "replace ",
+			"append-system-prompt": " append",
+		});
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), modelCtx(() => ({ id: "x" })));
-		expect(calls.setModel).toHaveLength(0);
+		await runApplySessionStart(handlers, makeCtx());
+		const r = await handlers.get("before_agent_start")![0](event("BASE"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "replace \n\n append" });
 	});
 
-	it("rejects unknown tools entirely", async () => {
-		writeProfile("p", { tools: ["read", "read", "nope"] });
+	it("loads prompt from @./ file for either key without trimming", async () => {
+		writeFileSync(join(dir, "sp.md"), "  file prompt\n");
+		writeProfile("p", { "append-system-prompt": "@./sp.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\n  file prompt\n" });
+	});
+
+	it("applies model thinking hint when thinking field is absent", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "x" })));
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+	});
+
+	it("lets separate thinking override model hint", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high", thinking: "low" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, modelCtx(() => ({ id: "x" })));
+		expect(calls.setThinkingLevel).toEqual(["low"]);
+	});
+
+	it("rejects unknown tools entirely with no partial hostcalls", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: "read, nope" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "y" }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toHaveLength(0);
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		expect(r).toBeUndefined();
+	});
+
+	it("does not reject unknown profile tools when tools concern dropped by CLI", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { tools: "nope" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--tools", "read"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		expect(calls.setActiveTools).toHaveLength(0);
+		expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("nope"));
+	});
+
+	it("sets zero tools when tools is an empty string", async () => {
+		writeProfile("p", { tools: "" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([[]]);
+	});
+
+	it("leaves default tools when tools is absent", async () => {
+		writeProfile("p", {});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+
+	it("deduplicates and trims tools while preserving order", async () => {
+		writeProfile("p", { tools: " read , bash , read , ls " });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([["read", "bash", "ls"]]);
+	});
+
+	it("rejects invalid dropped profile prompt file only when prompt concern is active", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", {
+			"system-prompt": "@./../escape.md",
+			"append-system-prompt": "keep",
+		});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--append-system-prompt", "cli"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		// dropped profile prompts: invalid @./../escape.md must not be opened/errored
+		expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("escape.md"));
+		const r = await handlers.get("before_agent_start")![0](event("BASE"), makeCtx());
+		expect(r).toBeUndefined();
+	});
+
+	it("rejects profile when an active prompt file is invalid", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { "append-system-prompt": "@./../escape.md" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("escape.md"));
+		expect(calls.setActiveTools).toHaveLength(0);
+		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r).toBeUndefined();
+	});
+
+	it("re-validates on reload", async () => {
+		writeProfile("p", { tools: "nope" });
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
@@ -530,54 +793,271 @@ describe("before_agent_start", () => {
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
 		expect(calls.setActiveTools).toHaveLength(0);
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
-		expect(r).toBeUndefined();
+		writeProfile("p", { tools: "read" });
+		warnSpy.mockClear();
+		await runApplySessionStart(handlers, makeCtx());
+		expect(calls.setActiveTools).toEqual([["read"]]);
+		expect(warnSpy).not.toHaveBeenCalled();
 	});
 
-	it("drops non-builtin tools unless explicitly named", async () => {
-		writeProfile("p", { tools: ["read"] });
+	it("refreshes cached prompts on reload", async () => {
+		writeFileSync(join(dir, "sp.md"), "A");
+		writeProfile("p", { "append-system-prompt": "@./sp.md" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
-		// Strict allowlist: only named tools are active.
+		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nA" });
+		writeFileSync(join(dir, "sp.md"), "B");
+		await runApplySessionStart(handlers, makeCtx());
+		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
+		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nB" });
+	});
+});
+
+// --- CLI precedence ---------------------------------------------------------
+
+describe("CLI precedence", () => {
+	it("no explicit flags -> profile applies fully", async () => {
+		writeProfile("p", {
+			model: "ollama-cloud/glm-5.2:high",
+			tools: "read",
+			"append-system-prompt": "sp",
+		});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "x" }));
+		await runApplySessionStart(handlers, ctx);
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toEqual(["high"]);
 		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
-	it("warns when the model is not found in the registry", async () => {
-		writeProfile("p", { provider: "x", model: "y" });
+	it("--model X drops profile model and model hint, keeps profile thinking", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high", thinking: "low" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), modelCtx(() => undefined));
+		const ctx = modelCtx(() => ({ id: "x" }));
+		await withArgv(["node", "pi", "--profile", "p", "--model", "ollama-cloud/kimi-k2.7-code"], async () => {
+			await runApplySessionStart(handlers, ctx);
+		});
 		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toEqual(["low"]);
 	});
 
-	it("skips setModel when ctx.modelRegistry is absent", async () => {
-		writeProfile("p", { provider: "x", model: "y" });
+	it("--provider X alone drops profile model and hint", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high" });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
-		const ctx = makeCtx();
-		delete (ctx as Partial<ExtensionCommandContext>).modelRegistry;
-		await handlers.get("before_agent_start")![0](event(), ctx);
+		const ctx = modelCtx(() => ({ id: "x" }));
+		await withArgv(["node", "pi", "--profile", "p", "--provider", "openai"], async () => {
+			await runApplySessionStart(handlers, ctx);
+		});
 		expect(calls.setModel).toHaveLength(0);
+		expect(calls.setThinkingLevel).toHaveLength(0);
 	});
 
-	it("loads system prompt from system_prompt_file relative to the profile root", async () => {
-		writeFileSync(join(dir, "sp.md"), "file prompt");
-		writeProfile("p", { system_prompt_file: "./sp.md" });
+	it("--thinking X drops profile thinking, keeps model", async () => {
+		writeProfile("p", { model: "ollama-cloud/glm-5.2:high" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "x" }));
+		await withArgv(["node", "pi", "--profile", "p", "--thinking", "low"], async () => {
+			await runApplySessionStart(handlers, ctx);
+		});
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toHaveLength(0);
+	});
+
+	it("each tools alias drops profile setActiveTools", async () => {
+		writeProfile("p", { tools: "read" });
+		const aliases = [
+			["node", "pi", "--profile", "p", "--tools", "bash"],
+			["node", "pi", "--profile", "p", "-t", "bash"],
+			["node", "pi", "--profile", "p", "--no-tools"],
+			["node", "pi", "--profile", "p", "-nt"],
+			["node", "pi", "--profile", "p", "--exclude-tools", "bash"],
+			["node", "pi", "--profile", "p", "-xt", "bash"],
+		];
+		for (const argv of aliases) {
+			const calls = makeCalls();
+			const flags = new Map([["profile", "p"]]);
+			const { pi, handlers } = makePi(calls, flags);
+			factory(pi);
+			await withArgv(argv, async () => {
+				await runApplySessionStart(handlers, makeCtx());
+			});
+			expect(calls.setActiveTools).toHaveLength(0);
+		}
+	});
+
+	it("dangling tools value flags do not override", async () => {
+		writeProfile("p", { tools: "read" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--tools"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		expect(calls.setActiveTools).toEqual([["read"]]);
+	});
+
+	it("=value spellings do not override any concern", async () => {
+		writeProfile("p", {
+			model: "ollama-cloud/glm-5.2:high",
+			thinking: "low",
+			tools: "read",
+			"append-system-prompt": "sp",
+		});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const ctx = modelCtx(() => ({ id: "x" }));
+		await withArgv(
+			[
+				"node",
+				"pi",
+				"--profile",
+				"p",
+				"--model=ollama-cloud/kimi-k2.7-code",
+				"--thinking=medium",
+				"--tools=bash",
+				"--append-system-prompt=cli",
+			],
+			async () => {
+				await runApplySessionStart(handlers, ctx);
+			}
+		);
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toEqual(["low"]);
+		expect(calls.setActiveTools).toEqual([["read"]]);
+		const r = await handlers.get("before_agent_start")![0](event("BASE"), ctx);
+		expect(r).toEqual({ systemPrompt: "BASE\n\nsp" });
+	});
+
+	it("explicit prompt flags drop profile prompts", async () => {
+		writeProfile("p", { "append-system-prompt": "profile" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--system-prompt", "cli"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		const r = await handlers.get("before_agent_start")![0](event("BASE"), makeCtx());
+		expect(r).toBeUndefined();
+	});
+
+	it("explicit prompt flags with no value do not drop profile prompts", async () => {
+		writeProfile("p", { "append-system-prompt": "profile" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--system-prompt"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		const r = await handlers.get("before_agent_start")![0](event("BASE"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BASE\n\nprofile" });
+	});
+});
+
+// --- skills -----------------------------------------------------------------
+
+describe("resources_discover skills", () => {
+	it("returns profile skills when they exist on disk", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-skill-"));
+		writeProfile("p", { skill: [skillDir] });
 		const calls = makeCalls();
 		const flags = new Map([["profile", "p"]]);
 		const { pi, handlers } = makePi(calls, flags);
 		factory(pi);
 		await runApplySessionStart(handlers, makeCtx());
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
-		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\nfile prompt" });
+		const res = handlers.get("resources_discover")![0](
+			{ cwd: process.cwd(), reason: "test" },
+			makeCtx()
+		) as { skillPaths?: string[] };
+		expect(res?.skillPaths).toEqual([skillDir]);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+
+	it("warns and skips missing profile skills", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		writeProfile("p", { skill: ["/nope"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		const res = handlers.get("resources_discover")![0](
+			{ cwd: process.cwd(), reason: "test" },
+			makeCtx()
+		);
+		expect(res).toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("/nope"));
+	});
+
+	it("adds CLI --skill paths to profile skills", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-skill-"));
+		writeProfile("p", {});
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		let res: { skillPaths?: string[] } | undefined;
+		await withArgv(["node", "pi", "--profile", "p", "--skill", skillDir], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+			res = handlers.get("resources_discover")![0](
+				{ cwd: process.cwd(), reason: "test" },
+				makeCtx()
+			) as { skillPaths?: string[] };
+		});
+		expect(res?.skillPaths).toEqual([skillDir]);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+
+	it("still returns profile skills when --no-skills is present", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-skill-"));
+		writeProfile("p", { skill: [skillDir] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--no-skills"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		const res = handlers.get("resources_discover")![0](
+			{ cwd: process.cwd(), reason: "test" },
+			makeCtx()
+		) as { skillPaths?: string[] };
+		expect(res?.skillPaths).toEqual([skillDir]);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+
+	it("returns undefined when profile is rejected", async () => {
+		writeProfile("p", { tools: "nope", skill: ["/x"] });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		const res = handlers.get("resources_discover")![0](
+			{ cwd: process.cwd(), reason: "test" },
+			makeCtx()
+		);
+		expect(res).toBeUndefined();
 	});
 });
 
@@ -619,12 +1099,26 @@ describe("/profiles command", () => {
 		expect(calls.sendMessage).toHaveLength(0);
 	});
 
-	it("new writes a scaffold when the destination is absent (no UI)", async () => {
+	it("show displays the persisted new-format JSON", async () => {
+		writeProfile("demo", { model: "ollama-cloud/glm-5.2:high", tools: "read" });
+		const { calls, command } = setupCommand();
+		await command("profiles")!.handler("show demo", makeCtx());
+		expect(calls.sendMessage).toHaveLength(1);
+		expect(calls.sendMessage[0].content).toContain('"model":"ollama-cloud/glm-5.2:high"');
+		expect(calls.sendMessage[0].content).toContain('"tools":"read"');
+	});
+
+	it("new writes a new-format scaffold", async () => {
 		const { command } = setupCommand();
 		await command("profiles")!.handler("new demo", makeCtx());
 		expect(existsSync(join(dir, "demo.json"))).toBe(true);
 		const scaffold = JSON.parse(readFileSync(join(dir, "demo.json"), "utf-8"));
-		expect(scaffold.description).toBe("TODO: describe this profile's purpose");
+		expect(scaffold.model).toBe("ollama-cloud/glm-5.2:high");
+		expect(typeof scaffold.tools).toBe("string");
+		expect(Array.isArray(scaffold.skill)).toBe(true);
+		expect(scaffold["append-system-prompt"]).toBeDefined();
+		expect(scaffold.provider).toBeUndefined();
+		expect(scaffold.system_prompt).toBeUndefined();
 	});
 
 	it("new bails non-interactively when the destination exists", async () => {
@@ -650,21 +1144,36 @@ describe("/profiles command", () => {
 	it("edit with UI saves valid JSON", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => '{"description":"edited"}' }) }));
+		await command("profiles")!.handler(
+			"edit p",
+			makeCtx({ hasUI: true, ui: uiStub({ editor: async () => '{"description":"edited"}' }) })
+		);
 		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("edited");
 	});
 
 	it("edit with UI + invalid JSON + confirm-false leaves the file unchanged", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => false }) }));
+		await command("profiles")!.handler(
+			"edit p",
+			makeCtx({
+				hasUI: true,
+				ui: uiStub({ editor: async () => "{not json", confirm: async () => false }),
+			})
+		);
 		expect(JSON.parse(readFileSync(join(dir, "p.json"), "utf-8")).description).toBe("d");
 	});
 
 	it("edit with UI + invalid JSON + confirm-true saves the invalid content", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles")!.handler("edit p", makeCtx({ hasUI: true, ui: uiStub({ editor: async () => "{not json", confirm: async () => true }) }));
+		await command("profiles")!.handler(
+			"edit p",
+			makeCtx({
+				hasUI: true,
+				ui: uiStub({ editor: async () => "{not json", confirm: async () => true }),
+			})
+		);
 		expect(readFileSync(join(dir, "p.json"), "utf-8")).toBe("{not json");
 	});
 
@@ -678,23 +1187,32 @@ describe("/profiles command", () => {
 	it("delete with UI + confirm-false keeps the file", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => false }) }));
+		await command("profiles")!.handler(
+			"delete p",
+			makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => false }) })
+		);
 		expect(existsSync(join(dir, "p.json"))).toBe(true);
 	});
 
 	it("delete with UI + confirm-true removes the file", async () => {
 		writeProfile("p", { description: "d" });
 		const { command } = setupCommand();
-		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		await command("profiles")!.handler(
+			"delete p",
+			makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) })
+		);
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 	});
 
 	it("delete removes a matching sibling prompt dir when confirmed", async () => {
-		writeProfile("p", { description: "d", system_prompt: "./p/sp.md" });
+		writeProfile("p", { description: "d", "append-system-prompt": "@./p/sp.md" });
 		mkdirSync(join(dir, "p"));
 		writeFileSync(join(dir, "p", "sp.md"), "prompt");
 		const { command } = setupCommand();
-		await command("profiles")!.handler("delete p", makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) }));
+		await command("profiles")!.handler(
+			"delete p",
+			makeCtx({ hasUI: true, ui: uiStub({ confirm: async () => true }) })
+		);
 		expect(existsSync(join(dir, "p.json"))).toBe(false);
 		expect(existsSync(join(dir, "p"))).toBe(false);
 	});
@@ -715,7 +1233,7 @@ describe("/profiles command", () => {
 		writeProfile("old", { description: "d" });
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
-		writeFileSync(join(dir, "new"), "blocker"); // a file at the toDir path → preflight aborts
+		writeFileSync(join(dir, "new"), "blocker");
 		const { command } = setupCommand();
 		await command("profiles")!.handler("rename old new", makeCtx());
 		expect(existsSync(join(dir, "old.json"))).toBe(true);
@@ -726,8 +1244,6 @@ describe("/profiles command", () => {
 		writeProfile("old", { description: "d" });
 		mkdirSync(join(dir, "old"));
 		writeFileSync(join(dir, "old", "system-prompt.md"), "prompt");
-		// toDir (dir/new) must be absent so preflight passes; then force the dir
-		// rename to fail so the profile rename is rolled back.
 		__piapMock.throwOnRenamePath = join(dir, "new");
 		const { command } = setupCommand();
 		await command("profiles")!.handler("rename old new", makeCtx());
@@ -766,7 +1282,10 @@ describe("/profiles command", () => {
 		writeProfile("planner", { description: "d" });
 		writeProfile("coder", {});
 		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("show p") as { value: string; label: string }[];
+		const r = command("profiles")!.getArgumentCompletions("show p") as {
+			value: string;
+			label: string;
+		}[];
 		expect(r.map((c) => c.value)).toEqual(["show planner"]);
 		expect(r.map((c) => c.label)).toEqual(["planner"]);
 	});
@@ -780,7 +1299,10 @@ describe("/profiles command", () => {
 	it("getArgumentCompletions completes source for rename", async () => {
 		writeProfile("planner", { description: "d" });
 		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("rename p") as { value: string; label: string }[];
+		const r = command("profiles")!.getArgumentCompletions("rename p") as {
+			value: string;
+			label: string;
+		}[];
 		expect(r.map((c) => c.value)).toEqual(["rename planner"]);
 		expect(r.map((c) => c.label)).toEqual(["planner"]);
 	});
@@ -789,25 +1311,16 @@ describe("/profiles command", () => {
 		const { command } = setupCommand();
 		expect(command("profiles")!.getArgumentCompletions("foo x")).toBe(null);
 	});
-});
 
-describe("argument completion keeps the subcommand (regression)", () => {
-	it("delete completion value includes the subcommand", async () => {
+	it("argument completion keeps the subcommand", async () => {
 		writeProfile("brainy", { description: "d" });
 		const { command } = setupCommand();
-		const r = command("profiles")!.getArgumentCompletions("delete b") as { value: string; label: string }[];
+		const r = command("profiles")!.getArgumentCompletions("delete b") as {
+			value: string;
+			label: string;
+		}[];
 		expect(r.map((c) => c.value)).toEqual(["delete brainy"]);
 		expect(r.map((c) => c.label)).toEqual(["brainy"]);
-	});
-
-});
-
-describe("second-pass review coverage", () => {
-	it("isValidProfileName rejects whitespace in names", () => {
-		expect(isValidProfileName("my profile")).toBe(false);
-		expect(isValidProfileName("a\tb")).toBe(false);
-		expect(isValidProfileName("a\nb")).toBe(false);
-		expect(isValidProfileName("ok")).toBe(true);
 	});
 
 	it("list silently skips malformed profile files", async () => {
@@ -820,489 +1333,9 @@ describe("second-pass review coverage", () => {
 		expect(body).toContain("alpha — a");
 		expect(body).not.toContain("bad");
 	});
-
-	it("all-unknown tools leaves the tool set unchanged (no setActiveTools call)", async () => {
-		writeProfile("p", { tools: ["nope", "alsogone"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-	it("empty tools array leaves all tools active (no setActiveTools call)", async () => {
-		writeProfile("p", { tools: [] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-	it("setModel returning false (no API key) warns and still applies the rest", async () => {
-		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"], system_prompt: "sp" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		(pi as unknown as { setModel: () => Promise<boolean> }).setModel = async () => false;
-		factory(pi);
-		const ctx = modelCtx(() => ({ id: "y" }));
-		await runApplySessionStart(handlers, ctx);
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx) as BeforeAgentStartEventResult;
-		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read"]]);
-		expect(r.systemPrompt).toContain("sp");
-	});
 });
 
-// --- session-name prefix feature -------------------------------------------
-
-describe("parseConfigFile", () => {
-	it("accepts an empty object (all defaults)", () => {
-		const r = parseConfigFile("{}", "config.json");
-		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
-	});
-	it("accepts prefix_session_name true/false", () => {
-		expect(parseConfigFile('{"prefix_session_name":true}', "c").ok).toBe(true);
-		expect(parseConfigFile('{"prefix_session_name":false}', "c").ok).toBe(true);
-	});
-	it("treats null/absent prefix_session_name as absent", () => {
-		const r = parseConfigFile('{"prefix_session_name":null}', "c");
-		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
-	});
-	it("rejects non-boolean prefix_session_name", () => {
-		expect(parseConfigFile('{"prefix_session_name":"yes"}', "c").ok).toBe(false);
-		expect(parseConfigFile('{"prefix_session_name":0}', "c").ok).toBe(false);
-	});
-	it("rejects non-object JSON", () => {
-		for (const c of ["[]", "null", '"hi"', "42"]) {
-			expect(parseConfigFile(c, "c").ok).toBe(false);
-		}
-	});
-	it("rejects invalid JSON", () => {
-		expect(parseConfigFile("{not json", "c").ok).toBe(false);
-	});
-	it("warns on unknown fields (typos)", () => {
-		const r = parseConfigFile('{"prefix_sesion_name":false}', "config.json");
-		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.warnings).toContain('unknown field "prefix_sesion_name" in config.json (ignored)');
-	});
-});
-
-describe("hasProfilePrefix / withProfilePrefix", () => {
-	it("detects exact-tag and tag+space, ignores other prefixes", () => {
-		expect(hasProfilePrefix("[planner]", "planner")).toBe(true);
-		expect(hasProfilePrefix("[planner] Foo", "planner")).toBe(true);
-		expect(hasProfilePrefix("[other] Foo", "planner")).toBe(false);
-		expect(hasProfilePrefix("Foo", "planner")).toBe(false);
-		expect(hasProfilePrefix("[planner]Foo", "planner")).toBe(false); // no space boundary
-	});
-	it("withProfilePrefix returns undefined for no name or already-prefixed", () => {
-		expect(withProfilePrefix(undefined, "planner")).toBeUndefined();
-		expect(withProfilePrefix("", "planner")).toBeUndefined();
-		expect(withProfilePrefix("[planner] Foo", "planner")).toBeUndefined();
-		expect(withProfilePrefix("[planner]", "planner")).toBeUndefined();
-	});
-	it("withProfilePrefix prepends the tag for a plain name", () => {
-		expect(withProfilePrefix("Foo", "planner")).toBe("[planner] Foo");
-		expect(withProfilePrefix("[other] Foo", "planner")).toBe("[planner] [other] Foo");
-	});
-});
-
-// Helper: build a pi instance with a profile flag and pre-seeded session name.
-function setupPrefix(profile: string | undefined, sessionName?: string) {
-	const calls = makeCalls();
-	const flags = new Map<string, boolean | string>();
-	if (profile !== undefined) flags.set("profile", profile);
-	const r = makePi(calls, flags);
-	if (sessionName !== undefined) r.setSessionNameState(sessionName);
-	factory(r.pi);
-	return { calls, handlers: r.handlers, pi: r.pi };
-}
-
-describe("session_start prefix hook", () => {
-	it("prefixes an existing --name on startup when a profile is active", async () => {
-		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toEqual(["[planner] Refactor auth"]);
-	});
-
-	it("does nothing when no profile is active", async () => {
-		const { calls, handlers } = setupPrefix(undefined, "Refactor auth");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("skips a name that already carries the prefix (resume of a pre-prefixed session)", async () => {
-		const { calls, handlers } = setupPrefix("planner", "[planner] Refactor auth");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("does nothing when there is no session name yet (/new)", async () => {
-		const { calls, handlers } = setupPrefix("planner");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("is disabled by config prefix_session_name=false", async () => {
-		writeConfig({ prefix_session_name: false });
-		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("ignores an invalid profile name (no prefix tag from a bad flag)", async () => {
-		const { calls, handlers } = setupPrefix("../p", "Refactor auth");
-		await runSessionStart(handlers, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-});
-
-describe("session_info_changed prefix hook", () => {
-	it("prefixes a plain name set via /name or RPC", async () => {
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
-	});
-
-	it("does not re-prefix (no loop) when the name already carries the tag", async () => {
-		// Simulates the re-entrant emit from our own setSessionName():
-		// pi emits session_info_changed again with the prefixed name.
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "[planner] Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
-	});
-
-	it("does nothing when the name is cleared (undefined)", async () => {
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: undefined }, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("does nothing when no profile is active", async () => {
-		const { calls, handlers } = setupPrefix(undefined);
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("is disabled by config prefix_session_name=false", async () => {
-		writeConfig({ prefix_session_name: false });
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toHaveLength(0);
-	});
-
-	it("stays enabled when the config file is absent (default on)", async () => {
-		// No writeConfig call — config file missing → defaults → prefix on.
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
-	});
-
-	it("stays enabled when config explicitly sets prefix_session_name=true", async () => {
-		writeConfig({ prefix_session_name: true });
-		const { calls, handlers } = setupPrefix("planner");
-		await handlers.get("session_info_changed")![0]({ type: "session_info_changed", name: "Fix bug" }, makeCtx());
-		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
-	});
-});
-
-describe("parseModelRef + combined model format", () => {
-	it("splits a combined provider/id model field", () => {
-		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
-	});
-	it("uses the separate provider when model has no slash", () => {
-		expect(parseModelRef("ollama-cloud", "glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
-	});
-	it("combined model field ignores a redundant separate provider", () => {
-		expect(parseModelRef("ollama-cloud", "ollama-cloud/glm-5.2")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: undefined });
-	});
-	it("bare model with no provider yields undefined provider", () => {
-		expect(parseModelRef(undefined, "glm-5.2")).toEqual({ provider: undefined, modelId: "glm-5.2", thinkingHint: undefined });
-	});
-	it("strips a :thinking suffix from the model id and surfaces it as a hint", () => {
-		expect(parseModelRef("ollama-cloud", "glm-5.2:high")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: "high" });
-		expect(parseModelRef(undefined, "ollama-cloud/glm-5.2:xhigh")).toEqual({ provider: "ollama-cloud", modelId: "glm-5.2", thinkingHint: "xhigh" });
-	});
-
-	it("session_start applies a combined-format model + thinking", async () => {
-		writeProfile("brain", { model: "ollama-cloud/glm-5.2", thinking: "high", system_prompt: "sp" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "brain"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
-		await runApplySessionStart(handlers, ctx);
-		expect(calls.setModel).toHaveLength(1);
-		expect(calls.setThinkingLevel).toEqual(["high"]);
-	});
-
-	it("session_start applies a :thinking hint from the model field when thinking is unset", async () => {
-		writeProfile("p", { model: "ollama-cloud/glm-5.2:high", system_prompt: "sp" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		const ctx = modelCtx((p, m) => ({ id: m, provider: p }));
-		await runApplySessionStart(handlers, ctx);
-		expect(calls.setModel).toHaveLength(1);
-		expect(calls.setThinkingLevel).toEqual(["high"]);
-	});
-});
-
-describe("CLI flag overrides (profile = default, explicit flags win)", () => {
-	const originalArgv = process.argv;
-	afterEach(() => {
-		process.argv = originalArgv;
-	});
-
-	it("cliFlagProvided detects --model and --name=value forms", async () => {
-		const { cliFlagProvided } = await import("../src/cli.ts");
-		process.argv = ["node", "pi", "--model", "glm-5.2"];
-		expect(cliFlagProvided("model")).toBe(true);
-		expect(cliFlagProvided("thinking")).toBe(false);
-		process.argv = ["node", "pi", "--tools=read,bash"];
-		expect(cliFlagProvided("tools", "t")).toBe(true);
-		process.argv = ["node", "pi", "-t", "read"];
-		expect(cliFlagProvided("tools", "t")).toBe(true);
-		process.argv = ["node", "pi", "-p", "hello --model world"];
-		expect(cliFlagProvided("model")).toBe(false); // not a standalone --model token
-	});
-
-	it("--model explicit skips profile model but still applies thinking/tools", async () => {
-		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		process.argv = ["node", "pi", "--profile", "p", "--model", "ollama-cloud/glm-5.2"];
-		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
-		expect(calls.setModel).toHaveLength(0);
-		expect(calls.setThinkingLevel).toEqual(["high"]);
-		expect(calls.setActiveTools).toEqual([["read"]]);
-	});
-
-	it("--thinking explicit skips profile thinking but still applies model", async () => {
-		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["read"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		process.argv = ["node", "pi", "--profile", "p", "--thinking", "low"];
-		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
-		expect(calls.setModel).toHaveLength(1);
-		expect(calls.setThinkingLevel).toHaveLength(0);
-	});
-
-	it("--tools explicit skips profile tools but still applies model", async () => {
-		writeProfile("p", { provider: "x", model: "y", tools: ["read"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		process.argv = ["node", "pi", "--profile", "p", "--tools", "bash"];
-		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
-		expect(calls.setModel).toHaveLength(1);
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-
-	it("-t short flag also skips profile tools", async () => {
-		writeProfile("p", { provider: "x", model: "y", tools: ["read"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		process.argv = ["node", "pi", "--profile", "p", "-t", "bash"];
-		await runApplySessionStart(handlers, modelCtx(() => ({ id: "y" })));
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-});
-
-// --- adversarial / security suite ------------------------------------------------
-
-describe("parseProfileFile validation", () => {
-	it("rejects system_prompt and system_prompt_file together", () => {
-		const r = parseProfileFile(
-			'{"system_prompt":"inline","system_prompt_file":"./sp.md"}',
-			"f.json"
-		);
-		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("Only one of system_prompt or system_prompt_file");
-	});
-
-	it("rejects an empty system_prompt_file", () => {
-		const r = parseProfileFile('{"system_prompt_file":""}', "f.json");
-		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("system_prompt_file must not be empty");
-	});
-
-	it("rejects an over-long inline system_prompt", () => {
-		const r = parseProfileFile('{"system_prompt":"' + "x".repeat(MAX_INLINE_PROMPT_LENGTH + 1) + '"}', "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects a system_prompt_file path that is too long", () => {
-		const r = parseProfileFile('{"system_prompt_file":"' + "x".repeat(MAX_PROMPT_FILE_PATH_LENGTH + 1) + '"}', "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects tools with more than MAX_TOOLS_ENTRIES entries", () => {
-		const r = parseProfileFile('{"tools":' + JSON.stringify(Array(MAX_TOOLS_ENTRIES + 1).fill("read")) + "}", "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects an empty tool name", () => {
-		const r = parseProfileFile('{"tools":[""]}', "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects a tool name that is too long", () => {
-		const r = parseProfileFile('{"tools":["' + "x".repeat(MAX_TOOL_NAME_LENGTH + 1) + '"]}', "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects skills with non-string entries", () => {
-		expect(parseProfileFile('{"skills":[1]}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"skills":"x"}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"skills":["a",{"b":1}]}', "f.json").ok).toBe(false);
-	});
-
-	it("rejects an empty skill entry", () => {
-		expect(parseProfileFile('{"skills":["","a"]}', "f.json").ok).toBe(false);
-	});
-
-	it("deduplicates skills (case-sensitive)", () => {
-		const r = parseProfileFile('{"skills":["a","a","b","A"]}', "f.json");
-		expect(r.ok).toBe(true);
-		if (r.ok) expect(r.profile.skills).toEqual(["a", "b", "A"]);
-	});
-
-	it("rejects more than MAX_SKILLS_ENTRIES skills", () => {
-		const r = parseProfileFile('{"skills":' + JSON.stringify(Array(MAX_SKILLS_ENTRIES + 1).fill("s")) + "}", "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects a skill entry that is too long", () => {
-		const r = parseProfileFile('{"skills":["' + "x".repeat(MAX_SKILL_ENTRY_LENGTH + 1) + '"]}', "f.json");
-		expect(r.ok).toBe(false);
-	});
-
-	it("rejects non-string provider, model, system_prompt, and system_prompt_file", () => {
-		expect(parseProfileFile('{"provider":{}}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"model":123}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"system_prompt":[]}', "f.json").ok).toBe(false);
-		expect(parseProfileFile('{"system_prompt_file":true}', "f.json").ok).toBe(false);
-	});
-});
-
-describe("system_prompt is inline text only", () => {
-	it("does not read a path-looking inline system_prompt", async () => {
-		writeFileSync(join(dir, "trap.md"), "should not appear");
-		writeProfile("p", { system_prompt: "./trap.md" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
-		expect(r).toEqual({ systemPrompt: "BUILT-IN\n\n./trap.md" });
-	});
-});
-
-describe("strict tools in session_start", () => {
-	it("activates only the named tools", async () => {
-		writeProfile("p", { tools: ["read"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read"]]);
-	});
-
-	it("retains explicit non-builtin tools", async () => {
-		writeProfile("p", { tools: ["read", "mcp_coord"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read", "mcp_coord"]]);
-	});
-
-	it("rejects a profile with any unknown tool name", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		writeProfile("p", { tools: ["nope"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
-		const r = await handlers.get("before_agent_start")![0](event(), makeCtx());
-		expect(r).toBeUndefined();
-	});
-
-	it("rejects a profile with a mix of known and unknown tool names (no partial apply)", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		writeProfile("p", { tools: ["read", "nope"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
-	});
-
-	it("sets zero tools when tools is an empty array", async () => {
-		writeProfile("p", { tools: [] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([[]]);
-	});
-
-	it("leaves the default tool set when tools is absent", async () => {
-		writeProfile("p", {});
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-	});
-});
-
-describe("skills resources_discover boundary", () => {
-	it("returns undefined and warns when a malformed Profile slips past parseProfileFile", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const profileMod = await import("../src/profile.ts");
-		vi.spyOn(profileMod, "readProfile").mockReturnValue({
-			ok: true,
-			profile: { skills: [1 as unknown as string] },
-			warnings: [],
-		});
-		writeProfile("p", {});
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		// Session start must have run so profileRejected is false and the
-		// resources handler reaches the readProfile call.
-		await runApplySessionStart(handlers, makeCtx());
-		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "test" }, makeCtx());
-		expect(res).toBeUndefined();
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("failed to discover skills"));
-	});
-});
+// --- bounded reads ----------------------------------------------------------
 
 describe("bounded reads", () => {
 	it("rejects an oversized profile JSON", () => {
@@ -1345,87 +1378,199 @@ describe("bounded reads", () => {
 		const r = readConfigFile();
 		expect(r.ok).toBe(false);
 	});
-});
 
-describe("reject propagation", () => {
-	it("does not apply model or thinking when tools are rejected", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		writeProfile("p", { provider: "x", model: "y", thinking: "high", tools: ["nope"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		const ctx = modelCtx(() => ({ id: "y" }));
-		await runApplySessionStart(handlers, ctx);
-		expect(calls.setModel).toHaveLength(0);
-		expect(calls.setThinkingLevel).toHaveLength(0);
-		expect(calls.setActiveTools).toHaveLength(0);
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("nope"));
-	});
-
-	it("does not apply model or thinking when system_prompt_file is rejected", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		writeProfile("p", { provider: "x", model: "y", thinking: "high", system_prompt_file: "./../escape.md" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		const ctx = modelCtx(() => ({ id: "y" }));
-		await runApplySessionStart(handlers, ctx);
-		expect(calls.setModel).toHaveLength(0);
-		expect(calls.setThinkingLevel).toHaveLength(0);
-		expect(calls.setActiveTools).toHaveLength(0);
-		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("../escape.md"));
-		const r = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
-		expect(r).toBeUndefined();
-	});
-
-	it("re-validates on /reload (session_start reason reload)", async () => {
-		writeProfile("p", { tools: ["nope"] });
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-		// Fix the profile and fire a new session_start; strict state is reset.
-		writeProfile("p", { tools: ["read"] });
-		warnSpy.mockClear();
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toEqual([["read"]]);
-		expect(warnSpy).not.toHaveBeenCalled();
-	});
-
-	it("returns undefined from resources_discover when the profile is rejected", async () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		writeProfile("p", { tools: ["nope"], skills: ["grilling"] });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		expect(calls.setActiveTools).toHaveLength(0);
-		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "test" }, makeCtx());
-		expect(res).toBeUndefined();
-	});
-
-	it("refreshes cachedPrompt on reload (not stale)", async () => {
-		writeFileSync(join(dir, "sp.md"), "A");
-		writeProfile("p", { system_prompt_file: "./sp.md" });
-		const calls = makeCalls();
-		const flags = new Map([["profile", "p"]]);
-		const { pi, handlers } = makePi(calls, flags);
-		factory(pi);
-		await runApplySessionStart(handlers, makeCtx());
-		const r1 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
-		expect(r1).toEqual({ systemPrompt: "BUILT-IN\n\nA" });
-		writeFileSync(join(dir, "sp.md"), "B");
-		await runApplySessionStart(handlers, makeCtx());
-		const r2 = await handlers.get("before_agent_start")![0](event("BUILT-IN"), makeCtx());
-		expect(r2).toEqual({ systemPrompt: "BUILT-IN\n\nB" });
+	it("readBoundedFile rejects a symlinked config file", () => {
+		const real = mkdtempSync(join(tmpdir(), "piap-cfg-symlink-"));
+		writeFileSync(join(real, "target.json"), "{}");
+		const link = join(dir, "linked-config.json");
+		symlinkSync(join(real, "target.json"), link);
+		const r = readBoundedFile(link, MAX_CONFIG_BYTES, "config");
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("symlink");
+		rmSync(real, { recursive: true, force: true });
 	});
 });
+
+// --- session-name prefix feature -------------------------------------------
+
+describe("parseConfigFile", () => {
+	it("accepts an empty object (all defaults)", () => {
+		const r = parseConfigFile("{}", "config.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
+	});
+	it("accepts prefix_session_name true/false", () => {
+		expect(parseConfigFile('{"prefix_session_name":true}', "c").ok).toBe(true);
+		expect(parseConfigFile('{"prefix_session_name":false}', "c").ok).toBe(true);
+	});
+	it("treats null/absent prefix_session_name as absent", () => {
+		const r = parseConfigFile('{"prefix_session_name":null}', "c");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.config.prefix_session_name).toBeUndefined();
+	});
+	it("rejects non-boolean prefix_session_name", () => {
+		expect(parseConfigFile('{"prefix_session_name":"yes"}', "c").ok).toBe(false);
+		expect(parseConfigFile('{"prefix_session_name":0}', "c").ok).toBe(false);
+	});
+	it("rejects non-object JSON", () => {
+		for (const c of ["[]", "null", '"hi"', "42"]) {
+			expect(parseConfigFile(c, "c").ok).toBe(false);
+		}
+	});
+	it("rejects invalid JSON", () => {
+		expect(parseConfigFile("{not json", "c").ok).toBe(false);
+	});
+	it("warns on unknown config fields", () => {
+		const r = parseConfigFile('{"prefix_sesion_name":false}', "config.json");
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(r.warnings).toContain('unknown field "prefix_sesion_name" in config.json (ignored)');
+	});
+});
+
+describe("hasProfilePrefix / withProfilePrefix", () => {
+	it("detects exact-tag and tag+space, ignores other prefixes", () => {
+		expect(hasProfilePrefix("[planner]", "planner")).toBe(true);
+		expect(hasProfilePrefix("[planner] Foo", "planner")).toBe(true);
+		expect(hasProfilePrefix("[other] Foo", "planner")).toBe(false);
+		expect(hasProfilePrefix("Foo", "planner")).toBe(false);
+		expect(hasProfilePrefix("[planner]Foo", "planner")).toBe(false);
+	});
+	it("withProfilePrefix returns undefined for no name or already-prefixed", () => {
+		expect(withProfilePrefix(undefined, "planner")).toBeUndefined();
+		expect(withProfilePrefix("", "planner")).toBeUndefined();
+		expect(withProfilePrefix("[planner] Foo", "planner")).toBeUndefined();
+		expect(withProfilePrefix("[planner]", "planner")).toBeUndefined();
+	});
+	it("withProfilePrefix prepends the tag for a plain name", () => {
+		expect(withProfilePrefix("Foo", "planner")).toBe("[planner] Foo");
+		expect(withProfilePrefix("[other] Foo", "planner")).toBe("[planner] [other] Foo");
+	});
+});
+
+function setupPrefix(profile: string | undefined, sessionName?: string) {
+	const calls = makeCalls();
+	const flags = new Map<string, boolean | string>();
+	if (profile !== undefined) {
+		flags.set("profile", profile);
+		if (isValidProfileName(profile)) writeProfile(profile, {});
+	}
+	const r = makePi(calls, flags);
+	if (sessionName !== undefined) r.setSessionNameState(sessionName);
+	factory(r.pi);
+	return { calls, handlers: r.handlers, pi: r.pi };
+}
+
+describe("session_start prefix hook", () => {
+	it("prefixes an existing --name on startup when a profile is active", async () => {
+		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toEqual(["[planner] Refactor auth"]);
+	});
+
+	it("does nothing when no profile is active", async () => {
+		const { calls, handlers } = setupPrefix(undefined, "Refactor auth");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("skips a name that already carries the prefix", async () => {
+		const { calls, handlers } = setupPrefix("planner", "[planner] Refactor auth");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("does nothing when there is no session name yet", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("is disabled by config prefix_session_name=false", async () => {
+		writeConfig({ prefix_session_name: false });
+		const { calls, handlers } = setupPrefix("planner", "Refactor auth");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("ignores an invalid profile name", async () => {
+		const { calls, handlers } = setupPrefix("../p", "Refactor auth");
+		await runSessionStart(handlers, makeCtx());
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+});
+
+describe("session_info_changed prefix hook", () => {
+	it("prefixes a plain name set via /name or RPC", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("does not re-prefix (no loop) when the name already carries the tag", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "[planner] Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("does nothing when the name is cleared", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: undefined },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("does nothing when no profile is active", async () => {
+		const { calls, handlers } = setupPrefix(undefined);
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("is disabled by config prefix_session_name=false", async () => {
+		writeConfig({ prefix_session_name: false });
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("stays enabled when config file is absent", async () => {
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+
+	it("stays enabled when config explicitly sets prefix_session_name=true", async () => {
+		writeConfig({ prefix_session_name: true });
+		const { calls, handlers } = setupPrefix("planner");
+		await handlers.get("session_info_changed")![0](
+			{ type: "session_info_changed", name: "Fix bug" },
+			makeCtx()
+		);
+		expect(calls.setSessionName).toEqual(["[planner] Fix bug"]);
+	});
+});
+
+// --- tightenStorageModes ----------------------------------------------------
 
 describe("tightenStorageModes", () => {
 	const isPosix = process.platform !== "win32";

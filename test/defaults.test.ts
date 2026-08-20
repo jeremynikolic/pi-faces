@@ -12,6 +12,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_PROFILES, SEED_MARKER, seedDefaultProfiles } from "../src/defaults.ts";
+import { parseProfileFile } from "../src/profile.ts";
 import { atomicWrite } from "../src/profile.ts";
 
 const isPosix = process.platform !== "win32";
@@ -51,11 +52,9 @@ describe("seedDefaultProfiles", () => {
 	});
 
 	it("never overwrites an existing profile file", () => {
-		// Pre-create a planner.json with user content; seeding must skip it.
 		writeFileSync(join(dir, "planner.json"), '{"description":"mine"}');
 		seedDefaultProfiles(dir);
 		expect(readFileSync(join(dir, "planner.json"), "utf-8")).toBe('{"description":"mine"}');
-		// Other defaults are still seeded.
 		expect(existsSync(join(dir, "coder.json"))).toBe(true);
 		expect(existsSync(join(dir, "reviewer.json"))).toBe(true);
 	});
@@ -74,6 +73,34 @@ describe("seedDefaultProfiles", () => {
 			expect((lstatSync(join(dir, name + ".json")).mode & 0o777).toString(8)).toBe("600");
 		}
 		expect((lstatSync(join(dir, SEED_MARKER)).mode & 0o777).toString(8)).toBe("600");
+	});
+
+	it("seeds profiles that pass the strict new parser", () => {
+		seedDefaultProfiles(dir);
+		for (const name of Object.keys(DEFAULT_PROFILES)) {
+			const r = parseProfileFile(readFileSync(join(dir, name + ".json"), "utf-8"), name + ".json");
+			expect(r.ok).toBe(true);
+		}
+	});
+
+	it("planner and reviewer use the expected packed model and comma tools", () => {
+		seedDefaultProfiles(dir);
+		const planner = JSON.parse(readFileSync(join(dir, "planner.json"), "utf-8"));
+		expect(planner.model).toBe("ollama-cloud/glm-5.2:high");
+		expect(planner.provider).toBeUndefined();
+		expect(typeof planner.tools).toBe("string");
+		expect(planner["append-system-prompt"]).toBeDefined();
+		expect(planner.system_prompt).toBeUndefined();
+		expect(planner.skills).toBeUndefined();
+	});
+
+	it("coder uses the expected packed model and comma tools", () => {
+		seedDefaultProfiles(dir);
+		const coder = JSON.parse(readFileSync(join(dir, "coder.json"), "utf-8"));
+		expect(coder.model).toBe("ollama-cloud/kimi-k2.7-code");
+		expect(coder.provider).toBeUndefined();
+		expect(typeof coder.tools).toBe("string");
+		expect(coder["append-system-prompt"]).toBeDefined();
 	});
 });
 

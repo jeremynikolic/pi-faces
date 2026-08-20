@@ -4,18 +4,18 @@
   <img src="art/banner.png" alt="pi-faces" width="1280">
 </p>
 
-**Faces** your agent can wear — each *face* is a named JSON profile bundling a short description, model, provider, thinking level, tools, and system prompt, selected via `--profile <name>`. Managed with the `/profiles` slash command. (Storage dir `~/.pi/faces/`. On first run after upgrading from the earlier `pi-agent-profiles` release, the extension auto-migrates `~/.pi/agent-profiles/` → `~/.pi/faces/` so existing profiles keep working — unless `PI_PROFILES_DIR` is set, in which case your override is used as-is.)
+**Faces** your agent can wear — each *face* is a named JSON profile bundling a short description, model, thinking level, tools, skills, and system prompt, selected via `--profile <name>`. Managed with the `/profiles` slash command. (Storage dir `~/.pi/faces/`. On first run after upgrading from the earlier `pi-agent-profiles` release, the extension auto-migrates `~/.pi/agent-profiles/` → `~/.pi/faces/` so existing profiles keep working — unless `PI_PROFILES_DIR` is set, in which case your override is used as-is.)
 
 ## Features
 
 - **`--profile <name>` CLI flag**: Select a profile from the command line; flags pass through to `pi` as normal.
 - **`/profiles` slash command**: List, show, create, edit, delete, and rename profiles in-session.
-- **Bundled config**: Description, model, provider, thinking, tools, and system prompt in one JSON file.
+- **Bundled config**: Description, model, provider, thinking, tools, skills, and system prompt in one JSON file.
 - **Per-session application**: Model, thinking, and tools applied once per session; system prompt applied every turn.
-- **Prompt modes**: Append to or replace pi's built-in system prompt (`replace_system_prompt`).
+- **Prompt modes**: Append to or replace pi's built-in system prompt (`append-system-prompt` and `system-prompt`).
 - **Session name prefix**: Active profile tags the session name so sessions group in `/resume` and `pi -r`.
 - **Seeded defaults**: `planner`, `coder`, and `reviewer` are written into `~/.pi/faces/` automatically on first run.
-- **Graceful defaults**: Omit any field and `pi` keeps its default; unknown tool names reject profile application; unknown fields are warned.
+- **Strict schema**: Unknown or legacy keys reject the profile, so typos are caught immediately.
 
 ## Install
 
@@ -59,36 +59,42 @@ Each profile is a JSON file. All fields are optional — omit a field and `pi` k
 ```json
 {
   "description": "Plans work before implementation: scopes tasks, identifies risks, and writes a plan.",
-  "provider": "ollama-cloud",
-  "model": "glm-5.2",
+  "model": "ollama-cloud/glm-5.2:high",
   "thinking": "high",
-  "tools": ["read", "bash", "grep"],
-  "skills": ["grilling", "domain-modeling"],
-  "system_prompt": "You are a planning agent...",
-  "replace_system_prompt": false
+  "tools": "read, bash, grep",
+  "skill": ["grilling", "domain-modeling"],
+  "append-system-prompt": "You are a planning agent..."
 }
 ```
 
 | Field | Effect | Optional |
 |---|---|---|
 | `description` | Short purpose string, shown by `/profiles list`. Not applied to the agent. | Yes |
-| `provider` | Provider ID (e.g. ollama-cloud, openai) | Yes |
-| `model` | Model ID — bare (`glm-5.2`, paired with `provider`), combined `provider/id` (`ollama-cloud/glm-5.2`), or `provider/id:thinking` (the `:thinking` is used only if `thinking` is unset) | Yes (requires provider unless combined) |
-| `thinking` | off / minimal / low / medium / high / xhigh / max | Yes |
-| `tools` | Strict tool allowlist across all tool sources (built-in, MCP, extension, custom). Unknown names reject profile application; an empty array means zero tools; omit the field for no restriction. | Yes |
-| `skills` | Skill name allowlist — each resolved to `~/.pi/skills/<name>` + loaded via `resources_discover` | Yes |
-| `system_prompt` | Inline text only; never interpreted as a path. Mutually exclusive with `system_prompt_file`. | Yes |
-| `system_prompt_file` | Relative path to a prompt file under the profile root. Contained to the profile root, regular file only, max 256 KiB. Mutually exclusive with `system_prompt`. | Yes |
-| `replace_system_prompt` | boolean. Default `false`: the profile prompt is **appended** to pi's built-in system prompt. `true`: replace it entirely. | Yes |
+| `model` | Model reference — packed `provider/id` (`ollama-cloud/glm-5.2`), packed with thinking hint (`ollama-cloud/glm-5.2:high`), or bare `id` paired with `provider`. | Yes (requires provider unless packed) |
+| `provider` | Provider ID paired with a bare `model` (e.g. `ollama-cloud`). Ignored when `model` is packed. | Yes (required for bare `model`) |
+| `thinking` | `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` | Yes |
+| `tools` | Comma-separated tool names (built-in, MCP, extension, custom). Unknown names reject the profile. Empty string (`""`) means zero tools; omit the field for no restriction. | Yes |
+| `skill` | Repeatable skill paths/names — each resolved to `~/.pi/skills/<name>` or an absolute/relative path. Missing paths are skipped with a warning. | Yes |
+| `system-prompt` | Replace pi's built-in system prompt with this literal text or `@./<file>` reference. | Yes |
+| `append-system-prompt` | Append this literal text or `@./<file>` reference to pi's built-in system prompt. Can be combined with `system-prompt`. | Yes |
 
-`system_prompt` is **inline text only** — it is never interpreted as a file path. Max 4096 characters.
+`system-prompt` and `append-system-prompt` are **literal text unless they start with `@./`**. Any other value, including `@foo` or `@`, is returned verbatim and never interpreted as a path.
 
-`system_prompt_file` loads prompt text from a file that is contained inside the profile root:
+Only `@./<relative-path>` loads from a file under the profile root:
 
-- Path must be relative (no leading `/` or `~/`, no `..` segment).
-- Resolved path must stay inside the profile root; symlink escapes are rejected.
-- Target must be a regular file and is read once per session.
-- Only one of `system_prompt` or `system_prompt_file` may be present in a profile.
+- The path must be relative and start with `./` after stripping the sigil.
+- It must stay inside the profile root; `..`, absolute (`@/…`), and tilde (`@~/…`) forms are rejected.
+- The target must be a regular file. Final-leaf symlinks are rejected, and the file is opened with `O_NOFOLLOW` to prevent TOCTOU swaps.
+- Maximum file size is 256 KiB.
+- Content is returned **without trimming**: leading/trailing whitespace and the final newline remain part of the value.
+
+### Prompt composition
+
+The exact result returned to pi is:
+
+- `system-prompt` only → the `system-prompt` value exactly.
+- `append-system-prompt` only → `event.systemPrompt + "\n\n" + append-system-prompt`.
+- both → `system-prompt + "\n\n" + append-system-prompt`.
 
 ### Trust model
 
@@ -96,42 +102,41 @@ A selected profile is trusted executable configuration / least-privilege policy.
 
 Strict semantics:
 
-- `tools` is a strict allowlist across every source. If any name is unknown, the whole profile is rejected and nothing from it is applied. Empty `[]` means zero tools; omitting the field means no restriction (pi default).
-- `system_prompt` is inline text only. To load a prompt from disk, use `system_prompt_file` with a relative path under the profile root; absolute, tilde, `..`, and symlink-escape paths are rejected.
-- `skills` must be an array of non-empty strings and is validated before use.
+- `tools` is a strict allowlist across every source. If any name is unknown, the whole profile is rejected and nothing from it is applied. Empty `""` means zero tools; omitting the field means no restriction (pi default).
+- `system-prompt` / `append-system-prompt` values are literal text unless they start with `@./`. To load from disk, use `@./<file>` under the profile root; absolute, tilde, `..`, and symlink-escape paths are rejected.
+- `skill` must be an array of non-empty strings. Missing resolved paths warn and skip, but do not reject the profile.
 - Profile and config files are read with size limits and only as regular files; oversized, symlinked, or non-regular files are rejected.
 - Storage is created/tightened as private: profile directories `0700`, files `0600`.
+- Unknown profile keys reject the profile immediately and the error lists the supported set (`description`, `model`, `provider`, `thinking`, `tools`, `skill`, `system-prompt`, `append-system-prompt`).
 
 Migration notes for existing profiles:
 
-- Profiles that used `system_prompt` as a file path must switch to `system_prompt_file` and place the prompt file under the profile root.
-- Profiles relying on implicit preservation of MCP/extension/custom tools must add each non-built-in tool name explicitly to `tools`.
-- `tools: []` now disables all tools; omit the field if you meant "no restriction".
+- This release is a **hard schema break**. Legacy keys (`skills`, `system_prompt`, `system_prompt_file`, `replace_system_prompt`) are rejected and there is no built-in converter.
+- Manual mapping: `system_prompt` → `append-system-prompt`; `system_prompt_file` → `append-system-prompt: "@./<path>"`; `skills` → `skill`; `tools: [...]` → comma-separated `tools`; remove `replace_system_prompt`.
+- `tools: []` now means zero tools; omit the field if you meant "no restriction".
 - Symlinked profile or config JSON files are rejected; replace them with real files or point `PI_PROFILES_DIR` at the real directory.
 
 ### Skills cherry-pick
 
-The `skills` field lists skill **names** or **paths**. At session start, the extension's `resources_discover` handler resolves each entry and contributes it as a skill path. Bare names resolve to `~/.pi/skills/<name>`; entries containing a path separator (or starting with `~`) are treated as paths (`~/` expanded, relative resolved against cwd, absolute as-is). Skills missing from the resolved path are skipped with a warning (no crash).
+The `skill` field lists skill **names** or **paths**. At session start, the extension's `resources_discover` handler resolves each entry and contributes it as a skill path. Bare names resolve to `~/.pi/skills/<name>`; entries containing a path separator (or starting with `~`) are treated as paths (`~/` expanded, relative resolved against cwd, absolute as-is). Skills missing from the resolved path are skipped with a warning (no crash).
 
-- **Additive (default):** if the spawn command does **not** pass `--no-skills`, pi's global skill discovery loads all skills in `~/.pi/skills` **plus** the profile's curated ones. The `skills` field guarantees the curated set is loaded; it does not exclude others.
-- **Hard cherry-pick:** pass `--no-skills` on the spawn command (e.g. `pi --profile coder --no-skills`) to disable global discovery. Then **only** the profile's `skills` list loads — nothing else. This is the per-profile skill cherry-pick.
+- **Additive (default):** if the spawn command does **not** pass `--no-skills`, pi's global skill discovery loads all skills in `~/.pi/skills` **plus** the profile's curated ones. The `skill` field guarantees the curated set is loaded; it does not exclude others.
+- **Hard cherry-pick:** pass `--no-skills` on the spawn command (e.g. `pi --profile coder --no-skills`) to disable global discovery. Then **only** the profile's `skill` list loads — nothing else. This is the per-profile skill cherry-pick. Profile `skill` entries are still returned even when `--no-skills` is present.
 
-Skills with `disable-model-invocation: true` in their frontmatter are **user-only** slash commands — they load but the agent cannot invoke them autonomously, so they're dead weight in an autonomous profile's `skills` list. Omit them.
-
-Unknown fields are reported as a warning (catches typos).
+Skills with `disable-model-invocation: true` in their frontmatter are **user-only** slash commands — they load but the agent cannot invoke them autonomously, so they're dead weight in an autonomous profile's `skill` list. Omit them.
 
 ### 💡 Tips & tricks — a clean, scoped agent profile
 
 For a tightly-scoped autonomous agent (a team worker, a one-off spawn) that should see **only** its curated skills — not every skill on disk — combine the two:
 
-1. **Curate the `skills` array** in the profile — list only the skills that role should invoke.
+1. **Curate the `skill` array** in the profile — list only the skills that role should invoke.
 2. **Pass `--no-skills` on the spawn** (`pi --profile <name> --no-skills`) — disables pi's global skill discovery.
 
 **Result:** the agent loads *only* the skills you listed — nothing else. Smaller context, no skill noise, no accidental invocations of unrelated skills. This is the per-profile hard cherry-pick.
 
-Without `--no-skills`, the `skills` array is **additive** (every skill in `~/.pi/skills` loads too). That's the right default for *interactive* sessions where you want the full slash-command palette available — but the wrong choice for a *bounded autonomous worker* where unrelated skills are distractions + context bloat.
+Without `--no-skills`, the `skill` array is **additive** (every skill in `~/.pi/skills` loads too). That's the right default for *interactive* sessions where you want the full slash-command palette available — but the wrong choice for a *bounded autonomous worker* where unrelated skills are distractions + context bloat.
 
-**Omit `disable-model-invocation: true` (user-only) skills** from a scoped profile's `skills` list — an autonomous agent can't invoke them, so they're dead weight even in a cherry-pick.
+**Omit `disable-model-invocation: true` (user-only) skills** from a scoped profile's `skill` list — an autonomous agent can't invoke them, so they're dead weight even in a cherry-pick.
 
 ## Managing Profiles
 
@@ -149,30 +154,49 @@ Use the `/profiles` command inside a pi session:
 Behavior notes:
 
 - `/profiles list` and `/profiles show` print into the conversation so an agent can read the available profiles.
-- `new` runs non-interactively when the destination does not exist (it skips the description/edit prompts).
+- `new` writes a new-format scaffold with a packed model, comma-separated `tools`, an array `skill`, and `append-system-prompt`. It runs non-interactively when the destination does not exist.
 - `edit` and `delete` use interactive dialogs and require an interactive session.
 - `rename` requires an interactive session only when the target already exists (to confirm overwrite).
+- The extension does not translate legacy keys during show/edit/save.
 - Profiles are also plain JSON files, so shell commands (`ls`, `rm`, `mv`) work too.
 
 ## Default Profiles
 
-Three ready-made profiles — `planner`, `coder`, and `reviewer` — are seeded into `~/.pi/faces/` automatically on first run (after `pi install`). Seeding is idempotent: it runs only once per directory (tracked by a `.defaults-seeded` marker) and never overwrites an existing file, so your edits and deletions stick. If you override `PI_PROFILES_DIR`, seeding is skipped — you own that directory.
+Three ready-made profiles — `planner`, `coder`, and `reviewer` — are seeded into `~/.pi/faces/` automatically on first run (after `pi install`). Seeding is idempotent: it runs only once per directory (tracked by a `.defaults-seeded` marker) and never overwrites an existing file, so your edits and deletions stick. The marker is not renamed or bumped. If you override `PI_PROFILES_DIR`, seeding is skipped — you own that directory.
 
 | Profile | Model | Purpose |
 |---|---|---|
-| `planner` | `glm-5.2` | Scope a goal, identify risks, write an actionable plan |
-| `coder` | `kimi-k2.7-code` | Take one bounded task, implement, run tests, report |
-| `reviewer` | `glm-5.2` | Check implementation vs plan, coverage, edge cases, simplicity |
+| `planner` | `ollama-cloud/glm-5.2:high` | Scope a goal, identify risks, write an actionable plan |
+| `coder` | `ollama-cloud/kimi-k2.7-code` | Take one bounded task, implement, run tests, report |
+| `reviewer` | `ollama-cloud/glm-5.2:high` | Check implementation vs plan, coverage, edge cases, simplicity |
 
 ## How It Works
 
 The extension registers a `--profile` CLI flag, a `/profiles` slash command, and applies the matching JSON in `before_agent_start`.
 
-**Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn. By default the profile prompt is **appended** to pi's built-in system prompt — set `replace_system_prompt: true` to replace it entirely.
+**Model, thinking, and tools are applied once per session** (so mid-session `/model` changes stick); the system prompt is applied every turn.
 
-Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names reject profile application; unknown profile fields are warned.
+Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names reject profile application; unknown profile keys reject the profile.
 
-**Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, or `--tools`/`-t` on the command line, the corresponding profile field is skipped for that run, so a profile sets your defaults and a one-off flag overrides them (e.g. `pi --profile planner --model ollama-cloud/kimi-k2.7-code`).
+**Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, `--tools`/`-t`, `--system-prompt`, or `--append-system-prompt` as separate flag/value tokens, the corresponding profile concern is skipped for that run. `--flag=value` spellings and dangling value flags are **not** recognised as overrides. One-off examples:
+
+```bash
+pi --profile planner --model ollama-cloud/kimi-k2.7-code
+pi --profile coder --tools read,write
+pi --profile reviewer --thinking low
+```
+
+The concerns are grouped independently:
+
+| Explicit CLI flag(s) | Effect on profile |
+|---|---|
+| `--model <v>` or `--provider <v>` | Skip profile `model` and any `:thinking` hint in it; profile `thinking` still applies unless `--thinking <v>` is also present. |
+| `--thinking <v>` | Skip profile `thinking` and model hint; profile `model` still applies unless `--model`/`--provider` is also present. |
+| `--tools <v>`, `-t <v>`, `--no-tools`, `-nt`, `--exclude-tools <v>`, `-xt <v>` | Skip profile `tools`; unrelated concerns still apply. |
+| `--system-prompt <v>` or `--append-system-prompt <v>` | Skip profile prompts; unrelated concerns still apply. |
+| `--skill <path>` | Additive with profile `skill`; profile `skill` is still returned with `--no-skills`. |
+
+Whole-CLI options such as `--session`, `--resume`, `--name`, `--extension`, `--theme`, and `--cwd` are outside profile reach.
 
 ## Session Name Prefix
 
@@ -191,12 +215,13 @@ echo '{"prefix_session_name": false}' > ~/.pi/faces/config/config.json
 ```
 
 | Config field | Type | Default | Effect |
-|---|---|---|---|
+|---|---|---|
 | `prefix_session_name` | boolean | `true` | Prefix the session display name with `[profile]` while a profile is active |
 
 - The config file is optional — when missing, defaults apply (prefix on).
+- `prefix_session_name` is only valid in `~/.pi/faces/config/config.json`; it is **not** a profile field.
 - Override the config path with the `PI_PROFILES_CONFIG` environment variable (useful for per-launch overrides without editing the file).
-- Unknown fields are warned; `null` is treated as absent.
+- Unknown config fields are warned; `null` is treated as absent.
 - The prefix is only added when a profile is active (`--profile` is set) and the name does not already carry the tag, so resuming a previously-prefixed session is not double-prefixed.
 
 ## License

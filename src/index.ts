@@ -9,7 +9,7 @@ import { registerProfilesCommand } from "./commands.ts";
 
 // Re-export public helpers so tests and consumers can import them from the
 // package entry. The factory below is the pi extension entry point.
-export { readSystemPromptFile, readBoundedFile, isValidProfileName, parseProfileFile } from "./profile.ts";
+export { resolvePromptValue, readBoundedFile, isValidProfileName, parseProfileFile, THINKING_LEVELS, SUPPORTED_PROFILE_KEYS } from "./profile.ts";
 export { parseConfigFile } from "./config.ts";
 export { hasProfilePrefix, withProfilePrefix } from "./prefix.ts";
 export { parseModelRef } from "./apply.ts";

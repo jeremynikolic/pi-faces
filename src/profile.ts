@@ -23,15 +23,14 @@ import {
 	MAX_PROFILE_JSON_BYTES,
 	MAX_PROMPT_FILE_BYTES,
 	MAX_PROMPT_FILE_PATH_LENGTH,
+	MAX_SKILL_ENTRIES,
 	MAX_SKILL_ENTRY_LENGTH,
-	MAX_SKILLS_ENTRIES,
-	MAX_TOOL_NAME_LENGTH,
-	MAX_TOOLS_ENTRIES,
+	MAX_TOOLS_STRING_LENGTH,
 } from "./limits.ts";
 
 const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = constants;
 
-const THINKING_LEVELS = new Set([
+export const THINKING_LEVELS = new Set([
 	"off",
 	"minimal",
 	"low",
@@ -41,27 +40,91 @@ const THINKING_LEVELS = new Set([
 	"max",
 ]);
 
-const KNOWN_FIELDS = new Set([
+export const SUPPORTED_PROFILE_KEYS = new Set([
 	"description",
-	"provider",
 	"model",
+	"provider",
 	"thinking",
 	"tools",
-	"skills",
-	"system_prompt",
-	"system_prompt_file",
-	"replace_system_prompt",
+	"skill",
+	"system-prompt",
+	"append-system-prompt",
 ]);
+
+function supportedSetText(): string {
+	return Array.from(SUPPORTED_PROFILE_KEYS).join(", ");
+}
 
 /** True for a usable profile name: non-empty, no slashes/space, not `.`/`..`. */
 export function isValidProfileName(name: string | undefined): name is string {
 	return (
 		typeof name === "string" &&
 		name.length > 0 &&
-		!/[/\\\s]/.test(name) &&
+		!/[\/\\\s]/.test(name) &&
 		name !== "." &&
 		name !== ".."
 	);
+}
+
+function isValidThinkingLevel(v: string): v is import("./types.ts").ThinkingLevel {
+	return THINKING_LEVELS.has(v);
+}
+
+function validateString(
+	p: Record<string, unknown>,
+	key: string,
+	file: string,
+	max: number,
+	allowEmpty: boolean
+): string | undefined {
+	if (!(key in p)) return undefined;
+	const v = p[key];
+	if (v === undefined) return undefined;
+	if (typeof v !== "string") {
+		return `${key} must be a string in ${file}`;
+	}
+	if (!allowEmpty && v.length === 0) {
+		return `${key} must not be empty in ${file}`;
+	}
+	if (v.length > max) {
+		return `${key} exceeds maximum length (${max}) in ${file}`;
+	}
+	return undefined;
+}
+
+function hasValue(p: Record<string, unknown>, key: string): boolean {
+	return key in p && p[key] !== undefined && p[key] !== null;
+}
+
+function validateModelProviderCrossField(
+	p: Record<string, unknown>,
+	file: string
+): string | undefined {
+	const hasModel = hasValue(p, "model");
+	const hasProvider = hasValue(p, "provider");
+	if (!hasModel && !hasProvider) return undefined;
+
+	if (hasProvider && !hasModel) {
+		return `provider requires a model in ${file}`;
+	}
+	if (hasModel && !hasProvider) {
+		const model = p.model as string;
+		if (!model.includes("/")) {
+			return `model without provider must use packed provider/id form in ${file}`;
+		}
+	}
+	if (hasModel) {
+		const model = p.model as string;
+		const slash = model.indexOf("/");
+		if (slash !== -1) {
+			const packedProvider = model.slice(0, slash);
+			const afterSlash = model.slice(slash + 1);
+			if (packedProvider.length === 0 || afterSlash.length === 0) {
+				return `packed model must have non-empty provider and id in ${file}`;
+			}
+		}
+	}
+	return undefined;
 }
 
 /** Parse a profile JSON file. Pure — no filesystem access. Exported for testing. */
@@ -78,73 +141,43 @@ export function parseProfileFile(content: string, file: string): ParseProfileRes
 	}
 
 	const p = parsed as Record<string, unknown>;
-	const warnings: string[] = [];
 
-	const validateString = (
-		key: string,
-		max: number,
-		allowEmpty: boolean
-	): string | undefined => {
-		if (key in p && p[key] !== undefined && p[key] !== null) {
-			const v = p[key];
-			if (typeof v !== "string") {
-				return key + " must be a string in " + file;
-			}
-			if (!allowEmpty && v.length === 0) {
-				return key + " must not be empty in " + file;
-			}
-			if (v.length > max) {
-				return key + " exceeds maximum length (" + max + ") in " + file;
-			}
-		}
-		return undefined;
-	};
-
-	// Mutual exclusivity: evaluated before other field validation.
-	const hasInline =
-		"system_prompt" in p && p.system_prompt !== undefined && p.system_prompt !== null;
-	const hasFile =
-		"system_prompt_file" in p &&
-		p.system_prompt_file !== undefined &&
-		p.system_prompt_file !== null;
-	if (hasInline && hasFile) {
-		return {
-			ok: false,
-			error:
-				"Only one of system_prompt or system_prompt_file may be set in " + file,
-		};
-	}
-
-	const descErr = validateString("description", MAX_DESCRIPTION_LENGTH, true);
-	if (descErr) return { ok: false, error: descErr };
-	const provErr = validateString("provider", MAX_FIELD_STRING_LENGTH, true);
-	if (provErr) return { ok: false, error: provErr };
-	const modelErr = validateString("model", MAX_FIELD_STRING_LENGTH, true);
-	if (modelErr) return { ok: false, error: modelErr };
-	const spErr = validateString("system_prompt", MAX_INLINE_PROMPT_LENGTH, true);
-	if (spErr) return { ok: false, error: spErr };
-	const spFileErr = validateString(
-		"system_prompt_file",
-		MAX_PROMPT_FILE_PATH_LENGTH,
-		false
-	);
-	if (spFileErr) return { ok: false, error: spFileErr };
-
-	if (
-		"replace_system_prompt" in p &&
-		p.replace_system_prompt !== undefined &&
-		p.replace_system_prompt !== null
-	) {
-		if (typeof p.replace_system_prompt !== "boolean") {
+	for (const key of Object.keys(p)) {
+		if (!SUPPORTED_PROFILE_KEYS.has(key)) {
 			return {
 				ok: false,
-				error: "replace_system_prompt must be a boolean in " + file,
+				error: `unsupported field "${key}" in ${file}; supported: ${supportedSetText()}`,
 			};
+		}
+		// null values are not accepted as "absent" in the strict schema.
+		if (p[key] === null) {
+			return { ok: false, error: `${key} must not be null in ${file}` };
 		}
 	}
 
-	if ("thinking" in p && p.thinking !== undefined && p.thinking !== null) {
-		if (typeof p.thinking !== "string" || !THINKING_LEVELS.has(p.thinking)) {
+	const crossErr = validateModelProviderCrossField(p, file);
+	if (crossErr) return { ok: false, error: crossErr };
+
+	const descErr = validateString(p, "description", file, MAX_DESCRIPTION_LENGTH, true);
+	if (descErr) return { ok: false, error: descErr };
+	const provErr = validateString(p, "provider", file, MAX_FIELD_STRING_LENGTH, true);
+	if (provErr) return { ok: false, error: provErr };
+	const modelErr = validateString(p, "model", file, MAX_FIELD_STRING_LENGTH, true);
+	if (modelErr) return { ok: false, error: modelErr };
+	const spErr = validateString(p, "system-prompt", file, MAX_INLINE_PROMPT_LENGTH, true);
+	if (spErr) return { ok: false, error: spErr };
+	const apErr = validateString(
+		p,
+		"append-system-prompt",
+		file,
+		MAX_INLINE_PROMPT_LENGTH,
+		true
+	);
+	if (apErr) return { ok: false, error: apErr };
+
+	if (hasValue(p, "thinking")) {
+		const v = p.thinking;
+		if (typeof v !== "string" || !isValidThinkingLevel(v)) {
 			return {
 				ok: false,
 				error:
@@ -156,77 +189,55 @@ export function parseProfileFile(content: string, file: string): ParseProfileRes
 		}
 	}
 
-	if ("tools" in p && p.tools !== undefined && p.tools !== null) {
-		if (!Array.isArray(p.tools)) {
-			return { ok: false, error: "tools must be an array of strings in " + file };
+	if (hasValue(p, "tools")) {
+		const v = p.tools;
+		if (typeof v !== "string") {
+			return { ok: false, error: "tools must be a comma-separated string in " + file };
 		}
-		if (p.tools.length > MAX_TOOLS_ENTRIES) {
+		if (v.length > MAX_TOOLS_STRING_LENGTH) {
 			return {
 				ok: false,
-				error:
-					"tools exceeds maximum entries (" +
-					MAX_TOOLS_ENTRIES +
-					") in " +
-					file,
-			};
-		}
-		if (
-			p.tools.some(
-				(t) => typeof t !== "string" || t.length === 0 || t.length > MAX_TOOL_NAME_LENGTH
-			)
-		) {
-			return {
-				ok: false,
-				error:
-					"tools must be non-empty strings with length <= " +
-					MAX_TOOL_NAME_LENGTH +
-					" in " +
-					file,
+				error: "tools exceeds maximum length (" + MAX_TOOLS_STRING_LENGTH + ") in " + file,
 			};
 		}
 	}
 
-	if ("skills" in p && p.skills !== undefined && p.skills !== null) {
-		if (!Array.isArray(p.skills)) {
-			return { ok: false, error: "skills must be an array of strings in " + file };
+	if (hasValue(p, "skill")) {
+		const v = p.skill;
+		if (!Array.isArray(v)) {
+			return { ok: false, error: "skill must be an array of strings in " + file };
 		}
-		if (p.skills.length > MAX_SKILLS_ENTRIES) {
+		if (v.length > MAX_SKILL_ENTRIES) {
 			return {
 				ok: false,
-				error:
-					"skills exceeds maximum entries (" +
-					MAX_SKILLS_ENTRIES +
-					") in " +
-					file,
+				error: "skill exceeds maximum entries (" + MAX_SKILL_ENTRIES + ") in " + file,
 			};
 		}
 		if (
-			p.skills.some(
+			v.some(
 				(s) => typeof s !== "string" || s.length === 0 || s.length > MAX_SKILL_ENTRY_LENGTH
 			)
 		) {
 			return {
 				ok: false,
 				error:
-					"skills must be non-empty strings with length <= " +
+					"skill must be non-empty strings with length <= " +
 					MAX_SKILL_ENTRY_LENGTH +
 					" in " +
 					file,
 			};
 		}
-		p.skills = Array.from(new Set(p.skills));
+		p.skill = Array.from(new Set(v));
 	}
 
-	for (const key of Object.keys(p)) {
-		if (!KNOWN_FIELDS.has(key)) {
-			warnings.push('unknown field "' + key + '" in ' + file + " (ignored)");
-		}
-	}
-
-	return { ok: true, profile: p as Profile, warnings };
+	return { ok: true, profile: p as Profile, warnings: [] };
 }
 
-/** Read a regular file with a byte ceiling. Used for profile/config JSON. */
+/** Read a regular file with a byte ceiling.
+ *
+ * Centralizes lstat regular-file/symlink rejection, fd open/fstat/ceiling/read
+ * for profile, config, and prompt targets. Preserves error redaction.
+ */
 export function readBoundedFile(
 	file: string,
 	maxBytes: number,
@@ -238,11 +249,18 @@ export function readBoundedFile(
 	try {
 		stats = lstatSync(file);
 	} catch (err) {
-		const code = err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
+		const code =
+			err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
 		return {
 			ok: false,
 			error: `Failed to read ${label} file ${file}${code ? " (" + code + ")" : ""}`,
 			code,
+		};
+	}
+	if (stats.isSymbolicLink()) {
+		return {
+			ok: false,
+			error: `${label} file is a symlink: ${file}`,
 		};
 	}
 	if (!stats.isFile()) {
@@ -257,16 +275,65 @@ export function readBoundedFile(
 			error: `${label} file too large (${stats.size} > ${maxBytes} bytes): ${file}`,
 		};
 	}
+
+	const openFlags =
+		O_RDONLY | O_NONBLOCK | (typeof O_NOFOLLOW === "number" ? O_NOFOLLOW : 0);
+
+	let fd: number;
 	try {
-		return { ok: true, content: readFileSync(file, "utf-8") };
+		fd = openSync(file, openFlags);
 	} catch (err) {
-		const code = err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
+		const code =
+			err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
+		return {
+			ok: false,
+			error: `Failed to open ${label} file ${file}${code ? " (" + code + ")" : ""}`,
+			code,
+		};
+	}
+
+	let stat;
+	try {
+		stat = fstatSync(fd);
+	} catch (err) {
+		closeSync(fd);
+		const code =
+			err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
+		return {
+			ok: false,
+			error: `Failed to stat ${label} file ${file}${code ? " (" + code + ")" : ""}`,
+			code,
+		};
+	}
+	if (!stat.isFile()) {
+		closeSync(fd);
+		return { ok: false, error: `${label} file is not a regular file: ${file}` };
+	}
+	if (stat.size > maxBytes) {
+		closeSync(fd);
+		return {
+			ok: false,
+			error: `${label} file too large (${stat.size} > ${maxBytes} bytes): ${file}`,
+		};
+	}
+
+	let content: string;
+	try {
+		content = readFileSync(fd, "utf-8");
+	} catch (err) {
+		closeSync(fd);
+		const code =
+			err && typeof err === "object" && "code" in err ? String(err.code) : undefined;
 		return {
 			ok: false,
 			error: `Failed to read ${label} file ${file}${code ? " (" + code + ")" : ""}`,
 			code,
 		};
+	} finally {
+		closeSync(fd);
 	}
+
+	return { ok: true, content };
 }
 
 /** Read and parse a profile by name. */
@@ -315,8 +382,6 @@ export function listProfiles(): ProfileSummary[] {
 	for (const entry of entries) {
 		if (!entry.endsWith(".json")) continue;
 		const name = entry.slice(0, -".json".length);
-		// Read silently — list/autocomplete must not spam warnings on every
-		// malformed file. Skip files that are missing or invalid.
 		const result = readProfile(name);
 		if (result.ok) {
 			summaries.push({ name, description: result.profile.description });
@@ -327,96 +392,54 @@ export function listProfiles(): ProfileSummary[] {
 }
 
 /**
- * Read a prompt file confined to the profile root, with TOCTOU-hardened fd
- * open + fstat + read-from-fd. Returns the trimmed content, or an error naming
- * the rejected path (content is never echoed).
+ * Resolve a prompt value.
+ *
+ * Only `@./…` is accepted as a file reference (loaded from the profile root).
+ * `@~/…` and `@/…` are classified as file forms and rejected.
+ * Every other string (including `@foo`, `@`, and literal whitespace) is returned
+ * verbatim with no filesystem access.
  */
-export function readSystemPromptFile(
+export function resolvePromptValue(
 	value: unknown,
 	baseRoot: string
 ): { ok: true; content: string } | { ok: false; error: string } {
-	if (typeof value !== "string" || value.length === 0) {
-		return { ok: false, error: "system_prompt_file must be a non-empty string" };
+	if (typeof value !== "string") {
+		return { ok: false, error: "prompt value must be a string" };
 	}
 
-	// Syntactic escapes: absolute, tilde, and parent-directory segments.
-	if (value.startsWith("/") || value.startsWith("~")) {
-		return { ok: false, error: "system_prompt_file path must be relative: " + value };
+	if (value.startsWith("@~/") || value.startsWith("@/")) {
+		return { ok: false, error: "prompt file path must be relative: " + value };
 	}
-	const normalized = path.normalize(value);
-	if (normalized.split(path.sep).includes("..")) {
-		return { ok: false, error: "system_prompt_file path must not contain .. segments: " + value };
+	if (!value.startsWith("@./")) {
+		return { ok: true, content: value };
+	}
+
+	const rawPath = value.slice(1); // strip leading '@'
+	const normalized = path.normalize(rawPath);
+	const segments = normalized.split(path.sep).filter(Boolean);
+	if (segments.includes("..")) {
+		return { ok: false, error: "prompt file path must not contain .. segments: " + value };
 	}
 
 	const root = realProfilesRoot();
-	let real: string;
-	try {
-		real = realpathSync(path.resolve(baseRoot, value));
-	} catch (err) {
+	const baseReal = realpathSync(baseRoot);
+	const resolved = path.resolve(baseReal, rawPath);
+	if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+		return { ok: false, error: "prompt file escapes profile root: " + value };
+	}
+
+	if (rawPath.length > MAX_PROMPT_FILE_PATH_LENGTH) {
 		return {
 			ok: false,
-			error: `system_prompt_file not found: ${value}${err ? " (" + err + ")" : ""}`,
+			error: "prompt file path exceeds maximum length (" + MAX_PROMPT_FILE_PATH_LENGTH + "): " + value,
 		};
 	}
 
-	if (real !== root && !real.startsWith(root + path.sep)) {
-		return {
-			ok: false,
-			error: `system_prompt_file escapes profile root: ${value} -> ${real}`,
-		};
+	const bounded = readBoundedFile(resolved, MAX_PROMPT_FILE_BYTES, "prompt");
+	if (!bounded.ok) {
+		return { ok: false, error: bounded.error };
 	}
-
-	const openFlags =
-		O_RDONLY |
-		O_NONBLOCK |
-		(typeof O_NOFOLLOW === "number" ? O_NOFOLLOW : 0);
-
-	let fd: number;
-	try {
-		fd = openSync(real, openFlags);
-	} catch (err) {
-		return {
-			ok: false,
-			error: `Failed to open system_prompt_file ${value}${err ? " (" + err + ")" : ""}`,
-		};
-	}
-
-	let stat;
-	try {
-		stat = fstatSync(fd);
-	} catch (err) {
-		closeSync(fd);
-		return {
-			ok: false,
-			error: `Failed to stat system_prompt_file ${value}${err ? " (" + err + ")" : ""}`,
-		};
-	}
-
-	if (!stat.isFile()) {
-		closeSync(fd);
-		return { ok: false, error: "system_prompt_file is not a regular file: " + value };
-	}
-	if (stat.size > MAX_PROMPT_FILE_BYTES) {
-		closeSync(fd);
-		return {
-			ok: false,
-			error: `system_prompt_file too large (${stat.size} > ${MAX_PROMPT_FILE_BYTES} bytes): ${value}`,
-		};
-	}
-
-	let content: string;
-	try {
-		content = readFileSync(fd, "utf-8");
-	} catch (err) {
-		return {
-			ok: false,
-			error: `Failed to read system_prompt_file ${value}${err ? " (" + err + ")" : ""}`,
-		};
-	} finally {
-		closeSync(fd);
-	}
-
-	return { ok: true, content: content.trim() };
+	return { ok: true, content: bounded.content };
 }
 
 /** Default scaffold written by `/profiles new`. */
@@ -425,11 +448,10 @@ export function defaultScaffold(description: string): string {
 		JSON.stringify(
 			{
 				description: description || "TODO: describe this profile's purpose",
-				provider: "ollama-cloud",
-				model: "glm-5.2",
-				thinking: "high",
-				tools: ["read", "bash", "grep", "find", "ls"],
-				system_prompt: "You are a...",
+				model: "ollama-cloud/glm-5.2:high",
+				tools: "read, bash, grep, find, ls",
+				skill: [],
+				"append-system-prompt": "You are a...",
 			},
 			null,
 			2

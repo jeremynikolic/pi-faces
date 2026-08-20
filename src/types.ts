@@ -1,17 +1,29 @@
 // Shared types for pi-faces.
 
+/** Allowed thinking levels. */
+export type ThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max";
+
 /** A profile JSON file. All fields optional — omit a field and pi keeps its default. */
 export interface Profile {
 	description?: string;
-	provider?: string;
 	model?: string;
-	thinking?: string;
-	tools?: string[];
-	skills?: string[];
-	system_prompt?: string;
-	/** Relative path to a prompt file under the profile root. Mutually exclusive with `system_prompt`. */
-	system_prompt_file?: string;
-	replace_system_prompt?: boolean;
+	provider?: string;
+	thinking?: ThinkingLevel;
+	/** Comma-separated tool names. */
+	tools?: string;
+	/** Repeatable skill paths/names. */
+	skill?: string[];
+	/** Replace the built-in system prompt with this value. */
+	"system-prompt"?: string;
+	/** Append this value to the built-in system prompt. */
+	"append-system-prompt"?: string;
 }
 
 export type ParseProfileResult =

@@ -6,11 +6,10 @@ export const DEFAULT_PROFILES: Record<string, object> = {
 	planner: {
 		description:
 			"Plans work before implementation: scopes a goal, identifies components/dependencies/risks, and writes an actionable plan.",
-		provider: "ollama-cloud",
-		model: "glm-5.2",
-		thinking: "high",
-		tools: ["read", "bash", "grep", "find", "ls"],
-		system_prompt: `You are a planning agent. Your job is to take a goal or problem description and produce a clear, actionable implementation plan.
+		model: "ollama-cloud/glm-5.2:high",
+		tools: "read, bash, grep, find, ls",
+		skill: [],
+		"append-system-prompt": `You are a planning agent. Your job is to take a goal or problem description and produce a clear, actionable implementation plan.
 
 ## Your responsibilities
 
@@ -30,10 +29,10 @@ Your output is a plan, not code. The implementation is done separately from your
 	coder: {
 		description:
 			"Focused implementation agent: takes one bounded task, writes the code, runs tests, and reports back.",
-		provider: "ollama-cloud",
-		model: "kimi-k2.7-code",
-		tools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
-		system_prompt: `You are a focused implementation agent. You take a single bounded task, write the code, run tests, and report back.
+		model: "ollama-cloud/kimi-k2.7-code",
+		tools: "read, write, edit, bash, grep, find, ls",
+		skill: [],
+		"append-system-prompt": `You are a focused implementation agent. You take a single bounded task, write the code, run tests, and report back.
 
 ## Your responsibilities
 
@@ -61,10 +60,10 @@ You implement. One task at a time.`,
 	reviewer: {
 		description:
 			"Code reviewer: checks implementation against the plan, test coverage, edge cases, and simplicity.",
-		provider: "ollama-cloud",
-		model: "glm-5.2",
-		tools: ["read", "bash", "grep", "find", "ls"],
-		system_prompt: `You are a code reviewer. You check implementation against the plan, test coverage, edge cases, and simplicity.
+		model: "ollama-cloud/glm-5.2:high",
+		tools: "read, bash, grep, find, ls",
+		skill: [],
+		"append-system-prompt": `You are a code reviewer. You check implementation against the plan, test coverage, edge cases, and simplicity.
 
 ## Your responsibilities
 

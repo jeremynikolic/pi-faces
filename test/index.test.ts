@@ -187,12 +187,13 @@ function modelCtx(findImpl: (p: string, m: string) => unknown): ExtensionCommand
 	return makeCtx({ modelRegistry: { find: findImpl } as unknown as ExtensionContext["modelRegistry"] });
 }
 
-function event(sp?: string): BeforeAgentStartEvent {
+function event(sp?: string, cliAppend?: string): BeforeAgentStartEvent {
 	return {
 		type: "before_agent_start",
 		prompt: "",
 		systemPrompt: sp ?? "BUILT-IN",
-	} as BeforeAgentStartEvent;
+		systemPromptOptions: { cwd: "/", appendSystemPrompt: cliAppend },
+	} as unknown as BeforeAgentStartEvent;
 }
 function sessionStartEvent() {
 	return { type: "session_start" } as unknown as BeforeAgentStartEvent;
@@ -751,7 +752,7 @@ describe("session_start applier", () => {
 		expect(calls.setActiveTools).toEqual([["read", "bash", "ls"]]);
 	});
 
-	it("rejects invalid dropped profile prompt file only when prompt concern is active", async () => {
+	it("skips invalid profile replace when CLI appends present, stacks profile append", async () => {
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		writeProfile("p", {
 			"system-prompt": "@./../escape.md",
@@ -764,10 +765,53 @@ describe("session_start applier", () => {
 		await withArgv(["node", "pi", "--profile", "p", "--append-system-prompt", "cli"], async () => {
 			await runApplySessionStart(handlers, makeCtx());
 		});
-		// dropped profile prompts: invalid @./../escape.md must not be opened/errored
+		// skipped profile replace: invalid @./../escape.md must not be opened/errored
 		expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("escape.md"));
-		const r = await handlers.get("before_agent_start")![0](event("BASE"), makeCtx());
-		expect(r).toBeUndefined();
+		// profile append still applies, stacked before the CLI append section
+		const r = await handlers
+			.get("before_agent_start")![0](event("BASE\n\ncli", "cli"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BASE\n\nkeep\n\ncli" });
+	});
+
+	it("profile append stacks before CLI appends", async () => {
+		writeProfile("p", { "append-system-prompt": "identity" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--append-system-prompt", "cli"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		const r = await handlers
+			.get("before_agent_start")![0](event("BASE\n\ncli", "cli"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BASE\n\nidentity\n\ncli" });
+	});
+
+	it("profile replace is skipped when only CLI appends present", async () => {
+		writeProfile("p", { "system-prompt": "R", "append-system-prompt": "A" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await withArgv(["node", "pi", "--profile", "p", "--append-system-prompt", "cli"], async () => {
+			await runApplySessionStart(handlers, makeCtx());
+		});
+		const r = await handlers
+			.get("before_agent_start")![0](event("BASE\n\ncli", "cli"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BASE\n\nA\n\ncli" });
+	});
+
+	it("unrecognised CLI append composition falls back to tail append", async () => {
+		writeProfile("p", { "append-system-prompt": "identity" });
+		const calls = makeCalls();
+		const flags = new Map([["profile", "p"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		await runApplySessionStart(handlers, makeCtx());
+		// options report a CLI append but the prompt does not contain the
+		// expected section (composition drift): stack at the tail, never drop.
+		const r = await handlers.get("before_agent_start")![0](event("BASE", "cli"), makeCtx());
+		expect(r).toEqual({ systemPrompt: "BASE\n\nidentity" });
 	});
 
 	it("rejects profile when an active prompt file is invalid", async () => {

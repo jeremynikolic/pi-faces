@@ -96,6 +96,8 @@ The exact result returned to pi is:
 - `append-system-prompt` only → `event.systemPrompt + "\n\n" + append-system-prompt`.
 - both → `system-prompt + "\n\n" + append-system-prompt`.
 
+When the CLI also passes `--append-system-prompt` layers, the profile append composes **before** them — the final order is: built-in prompt → profile `append-system-prompt` → CLI append layers (in flag order) → project context/skills. This is the intended layering for multi-agent spawn patterns (e.g. `pi --profile critic --append-system-prompt ~/.pi/team/critic.md --append-system-prompt '## Your task...'`): the profile carries the persona identity, CLI appends add team/run context — every layer applies.
+
 ### Trust model
 
 A selected profile is trusted executable configuration / least-privilege policy. It can replace the system prompt, scope the available tools, and inject skill paths, so treat profile JSON like code you would run.
@@ -178,7 +180,7 @@ The extension registers a `--profile` CLI flag, a `/profiles` slash command, and
 
 Settings go through pi's hostcalls (`getFlag`, `modelRegistry.find` + `setModel`, `setThinkingLevel`, `setActiveTools`) and a `{ systemPrompt }` return. Unknown tool names reject profile application; unknown profile keys reject the profile.
 
-**Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, `--tools`/`-t`, `--system-prompt`, or `--append-system-prompt` as separate flag/value tokens, the corresponding profile concern is skipped for that run. `--flag=value` spellings and dangling value flags are **not** recognised as overrides. One-off examples:
+**Profiles act as defaults — explicit CLI flags win.** If you also pass `--model`/`--provider`, `--thinking`, `--tools`/`-t`, or `--system-prompt` as separate flag/value tokens, the corresponding profile concern is skipped for that run. `--append-system-prompt` is the exception: it **composes** with the profile's append prompt instead of overriding it (see the table below). `--flag=value` spellings and dangling value flags are **not** recognised as overrides. One-off examples:
 
 ```bash
 pi --profile planner --model ollama-cloud/kimi-k2.7-code
@@ -193,7 +195,8 @@ The concerns are grouped independently:
 | `--model <v>` or `--provider <v>` | Skip profile `model` and any `:thinking` hint in it; profile `thinking` still applies unless `--thinking <v>` is also present. |
 | `--thinking <v>` | Skip profile `thinking` and model hint; profile `model` still applies unless `--model`/`--provider` is also present. |
 | `--tools <v>`, `-t <v>`, `--no-tools`, `-nt`, `--exclude-tools <v>`, `-xt <v>` | Skip profile `tools`; unrelated concerns still apply. |
-| `--system-prompt <v>` or `--append-system-prompt <v>` | Skip profile prompts; unrelated concerns still apply. |
+| `--system-prompt <v>` | Full prompt ownership: skip all profile prompts; unrelated concerns still apply. |
+| `--append-system-prompt <v>` | **Compose, not override.** Profile `append-system-prompt` still applies, stacked **before** the CLI append layers (identity first, CLI additions after); profile `system-prompt` (replace) is skipped so the built-in base survives; unrelated concerns still apply. |
 | `--skill <path>` | Additive with profile `skill`; profile `skill` is still returned with `--no-skills`. |
 
 Whole-CLI options such as `--session`, `--resume`, `--name`, `--extension`, `--theme`, and `--cwd` are outside profile reach.

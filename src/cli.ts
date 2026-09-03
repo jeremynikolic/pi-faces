@@ -120,19 +120,14 @@ export function splitTools(value: string): string[] {
 	);
 }
 
-/** True when an explicit --system-prompt or --append-system-prompt value token is present. */
-export function cliPromptConcern(argv: string[] = getArgv()): boolean {
-	return (
-		cliFlagValue(argv, "system-prompt") !== undefined ||
-		cliFlagValue(argv, "append-system-prompt") !== undefined
-	);
+/** True when an explicit --system-prompt value token is present (full prompt ownership). */
+export function cliSystemPromptConcern(argv: string[] = getArgv()): boolean {
+	return cliFlagValue(argv, "system-prompt") !== undefined;
 }
 
-export function getCliPrompt(
-	key: "system-prompt" | "append-system-prompt",
-	argv: string[] = getArgv()
-): string | undefined {
-	return cliFlagValue(argv, key);
+/** True when an explicit --append-system-prompt value token is present. */
+export function cliAppendPromptConcern(argv: string[] = getArgv()): boolean {
+	return cliFlagValue(argv, "append-system-prompt") !== undefined;
 }
 
 /** Paths passed via standalone `--skill <path>` tokens, in order. */

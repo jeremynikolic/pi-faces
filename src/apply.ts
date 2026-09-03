@@ -7,9 +7,10 @@ import type {
 import { expandTilde, realProfilesRoot } from "./paths.ts";
 import { isValidProfileName, readProfile, resolvePromptValue, THINKING_LEVELS } from "./profile.ts";
 import {
+	cliAppendPromptConcern,
 	cliModelConcern,
-	cliPromptConcern,
 	cliSkillPaths,
+	cliSystemPromptConcern,
 	cliThinkingConcern,
 	cliToolsConcern,
 	splitTools,
@@ -26,9 +27,13 @@ import path from "node:path";
  * startup (not pi's defaults). The system prompt is cached during
  * `session_start` and applied every turn in `before_agent_start`.
  *
- * Profile fields are defaults — explicit CLI flags (--model/--provider,
- * --thinking, --tools, --system-prompt, --append-system-prompt) skip the
- * corresponding profile concern.
+ * Profile fields are defaults. Explicit CLI flags override the corresponding
+ * profile concern, except that `--append-system-prompt` COMPOSES instead of
+ * overriding: the profile's `append-system-prompt` always applies, stacked
+ * before any CLI append layers (identity first, then CLI additions).
+ * `--system-prompt` (replace) takes full prompt ownership and skips all
+ * profile prompts; when only CLI appends are present, the profile's
+ * `system-prompt` (replace) is skipped and the built-in base is kept.
  *
  * A profile that fails validation (unknown tools, unreadable prompt file,
  * etc.) is rejected entirely: `profileRejected` is set and no profile
@@ -85,12 +90,17 @@ export class ProfileApplier {
 		const modelDropped = cliModelConcern(argv);
 		const thinkingDropped = cliThinkingConcern(argv);
 		const toolsDropped = cliToolsConcern(argv);
-		const promptDropped = cliPromptConcern(argv);
+		// Prompt precedence: `--system-prompt` (replace) owns the prompt fully
+		// and skips all profile prompts. CLI `--append-system-prompt` composes:
+		// the profile append still applies (stacked first); the profile replace
+		// is skipped so the built-in base survives for the appends to layer on.
+		const promptAppendDropped = cliSystemPromptConcern(argv);
+		const promptReplaceDropped = promptAppendDropped || cliAppendPromptConcern(argv);
 
 		// Preflight: resolve active prompts + validate active tools BEFORE any
 		// hostcall. Any active-concern failure rejects the whole profile with no
 		// partial hostcalls/cached skills.
-		if (!promptDropped) {
+		if (!promptReplaceDropped) {
 			const replaceValue = profile["system-prompt"];
 			if (replaceValue !== undefined) {
 				const r = resolvePromptValue(replaceValue, realProfilesRoot());
@@ -101,6 +111,8 @@ export class ProfileApplier {
 				}
 				this.replacePrompt = r.content;
 			}
+		}
+		if (!promptAppendDropped) {
 			const appendValue = profile["append-system-prompt"];
 			if (appendValue !== undefined) {
 				const r = resolvePromptValue(appendValue, realProfilesRoot());
@@ -180,14 +192,33 @@ export class ProfileApplier {
 		const hasAppend = this.appendPrompt !== undefined;
 		if (!hasReplace && !hasAppend) return undefined;
 
+		// CLI append layers, as composed by pi into the built prompt. When
+		// present, the profile append is stacked BEFORE them (identity first,
+		// CLI additions after) instead of at the prompt tail.
+		const cliAppend = event.systemPromptOptions?.appendSystemPrompt;
+
 		// Composition is exact and untrimmed.
 		if (hasReplace && !hasAppend) {
-			return { systemPrompt: this.replacePrompt };
+			return { systemPrompt: cliAppend ? this.replacePrompt + "\n\n" + cliAppend : this.replacePrompt };
 		}
 		if (!hasReplace && hasAppend) {
-			return { systemPrompt: event.systemPrompt + "\n\n" + this.appendPrompt };
+			if (!cliAppend) {
+				return { systemPrompt: event.systemPrompt + "\n\n" + this.appendPrompt };
+			}
+			const marker = "\n\n" + cliAppend;
+			const idx = event.systemPrompt.indexOf(marker);
+			if (idx === -1) {
+				// Unrecognised composition: fall back to stacking after the CLI
+				// layers rather than dropping the profile append.
+				return { systemPrompt: event.systemPrompt + "\n\n" + this.appendPrompt };
+			}
+			return {
+				systemPrompt: event.systemPrompt.slice(0, idx) + "\n\n" + this.appendPrompt + event.systemPrompt.slice(idx),
+			};
 		}
-		return { systemPrompt: this.replacePrompt + "\n\n" + this.appendPrompt };
+		return {
+			systemPrompt: this.replacePrompt + "\n\n" + this.appendPrompt + (cliAppend ? "\n\n" + cliAppend : ""),
+		};
 	}
 
 	/** Contribute the profile's curated skill paths (cherry-pick via resources_discover). */

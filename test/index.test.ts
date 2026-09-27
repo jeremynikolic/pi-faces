@@ -290,7 +290,7 @@ describe("parseProfileFile schema", () => {
 				provider: "ignored",
 				thinking: "high",
 				tools: "read, bash",
-				skill: ["qmd"],
+				skill: ["git"],
 				"system-prompt": "replace",
 				"append-system-prompt": "append",
 			}),

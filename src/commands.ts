@@ -395,7 +395,7 @@ export function registerFaceCommand(
 
 	async function faceSwap(name: string, ctx: ExtensionCommandContext) {
 		if (!isValidProfileName(name)) {
-			notifyWarning(ctx, "Usage: /face <name>");
+			notifyWarning(ctx, 'Invalid profile name: "' + name + '"');
 			return;
 		}
 		const result = readProfile(name);
@@ -408,7 +408,12 @@ export function registerFaceCommand(
 		resolver.setOverride(name);
 		await applier.applyProfileBestEffort(name, ctx, makeReporter(ctx));
 
-		resolver.appendFaceEntry(name, resolver.getDefaultTools());
+		try {
+			resolver.appendFaceEntry(name, resolver.getDefaultTools());
+		} catch (err) {
+			notifyWarning(ctx, "Failed to persist face state: " + err);
+			return;
+		}
 		prefix.transition(oldName, name);
 
 		const oldSkills = skillSet(oldName);
@@ -422,7 +427,12 @@ export function registerFaceCommand(
 		const oldName = resolver.activeProfileName();
 		resolver.setOverride(null);
 		applier.clearFaceProfile(ctx, makeReporter(ctx));
-		resolver.appendFaceEntry(null, resolver.getDefaultTools());
+		try {
+			resolver.appendFaceEntry(null, resolver.getDefaultTools());
+		} catch (err) {
+			notifyWarning(ctx, "Failed to persist face state: " + err);
+			return;
+		}
 		prefix.transition(oldName, undefined);
 
 		const oldSkills = skillSet(oldName);

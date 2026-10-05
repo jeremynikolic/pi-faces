@@ -203,17 +203,19 @@ interface CtxOpts {
 	hasUI?: boolean;
 	modelRegistry?: ExtensionContext["modelRegistry"];
 	branch?: unknown[];
+	sessionManager?: { getBranch: () => unknown[] };
 	reload?: () => Promise<void>;
 }
 
 function makeCtx(opts: CtxOpts = {}): ExtensionCommandContext {
+	const sessionManager = opts.sessionManager ?? { getBranch: () => opts.branch ?? [] };
 	return {
 		ui: opts.ui ?? uiStub(),
 		hasUI: opts.hasUI ?? false,
 		mode: "print",
 		cwd: process.cwd(),
 		modelRegistry: opts.modelRegistry,
-		sessionManager: { getBranch: () => opts.branch ?? [] },
+		sessionManager,
 		reload: opts.reload ?? (async () => {}),
 	} as unknown as ExtensionCommandContext;
 }
@@ -230,8 +232,8 @@ function event(sp?: string, cliAppend?: string): BeforeAgentStartEvent {
 		systemPromptOptions: { cwd: "/", appendSystemPrompt: cliAppend },
 	} as unknown as BeforeAgentStartEvent;
 }
-function sessionStartEvent() {
-	return { type: "session_start", reason: "startup" } as unknown as BeforeAgentStartEvent;
+function sessionStartEvent(reason: "startup" | "reload" | "new" | "resume" | "fork" = "startup") {
+	return { type: "session_start", reason } as unknown as BeforeAgentStartEvent;
 }
 
 async function runApplySessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
@@ -1759,7 +1761,7 @@ describe("/face command", () => {
 		}));
 		const reloadCtx = makeCtx({ branch });
 		for (const h of handlers.get("session_start") ?? []) {
-			await h({ type: "session_start", reason: "reload" }, reloadCtx);
+			await h(sessionStartEvent("reload"), reloadCtx);
 		}
 		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "reload" }, reloadCtx) as { skillPaths?: string[] } | undefined;
 		expect(res?.skillPaths).toEqual([skillDir]);
@@ -1893,7 +1895,7 @@ describe("/face command", () => {
 		});
 		await faceCmd!.handler("../x", ctx);
 		expect(calls.appendEntry).toHaveLength(0);
-		expect(notifications.some(([m, t]) => t === "warning" && m.includes("Usage"))).toBe(true);
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("Invalid profile name"))).toBe(true);
 	});
 
 	it("missing profile warns and creates no entry", async () => {
@@ -1937,19 +1939,62 @@ describe("/face command", () => {
 
 describe("active profile resolver", () => {
 	it("last face entry wins on current branch", async () => {
-		const { calls, handlers, command } = setupFaceCommand({
-			branch: [
-				{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "a", defaultTools: null } },
-				{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "b", defaultTools: null } },
-			],
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", tools: "read" });
+		writeProfile("b", { model: "ollama-cloud/kimi-k2.7-code", tools: "bash" });
+		const branch = [
+			{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "a", defaultTools: null } },
+			{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "b", defaultTools: null } },
+		];
+		const { calls, handlers } = setupFaceCommand({ branch });
+		const sessionManager = { getBranch: () => branch };
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+			sessionManager,
 		});
-		const ctx = makeCtx();
 		for (const h of handlers.get("session_start") ?? []) {
-			await h({ type: "session_start", reason: "resume" }, ctx);
+			await h(sessionStartEvent("resume"), ctx);
 		}
-		// No setSessionName should happen on resume with no active flag/override profile name set,
-		// because source is override with profile b and no session name was provided.
-		expect(calls.setSessionName).toHaveLength(0);
+		// Last face entry (b) wins: applier applies b's model and tools on resume.
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setModel[0]).toMatchObject({ id: "kimi-k2.7-code", provider: "ollama-cloud" });
+		expect(calls.setActiveTools).toEqual([["bash"]]);
+	});
+
+	it("malformed entry does not mask earlier valid face entry", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", tools: "read" });
+		const branch = [
+			{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "a", defaultTools: null } },
+			{ type: "custom", customType: "pi-faces", data: { version: 2, kind: "face", profile: "b", defaultTools: null } },
+		];
+		const { calls, handlers } = setupFaceCommand({ branch });
+		const sessionManager = { getBranch: () => branch };
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+			sessionManager,
+		});
+		for (const h of handlers.get("session_start") ?? []) {
+			await h(sessionStartEvent("resume"), ctx);
+		}
+		expect(calls.setActiveTools).toEqual([["read"]]);
+	});
+
+	it("abandoned branch entry is ignored", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", tools: "read" });
+		writeProfile("b", { model: "ollama-cloud/kimi-k2.7-code", tools: "bash" });
+		// Simulate a new branch from the first entry: only the older face entry is reachable.
+		const branchFromA: unknown[] = [
+			{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "a", defaultTools: null } },
+		];
+		const { calls, handlers } = setupFaceCommand({ branch: branchFromA });
+		const sessionManager = { getBranch: () => branchFromA };
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+			sessionManager,
+		});
+		for (const h of handlers.get("session_start") ?? []) {
+			await h(sessionStartEvent("resume"), ctx);
+		}
+		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
 	it("null off sentinel survives reload and restores baseline", async () => {
@@ -1961,7 +2006,7 @@ describe("active profile resolver", () => {
 		});
 		const ctx = makeCtx();
 		for (const h of handlers.get("session_start") ?? []) {
-			await h({ type: "session_start", reason: "startup" }, ctx);
+			await h(sessionStartEvent("startup"), ctx);
 		}
 		expect(calls.appendEntry).toHaveLength(1);
 		expect(calls.appendEntry[0].data).toMatchObject({ kind: "baseline", defaultTools: ["bash", "grep"] });
@@ -1984,7 +2029,7 @@ describe("active profile resolver", () => {
 		const { pi: pi2, handlers: handlers2 } = makePi(callsAfter, new Map<string, boolean | string>([["profile", "coder"]]));
 		factory(pi2);
 		for (const h of handlers2.get("session_start") ?? []) {
-			await h({ type: "session_start", reason: "reload" }, reloadCtx);
+			await h(sessionStartEvent("reload"), reloadCtx);
 		}
 		expect(callsAfter.setActiveTools).toEqual([["bash", "grep"]]);
 		expect(callsAfter.setModel).toHaveLength(0);
@@ -2018,7 +2063,7 @@ describe("tools-default rule", () => {
 		factory(pi);
 		const ctx = makeCtx();
 		for (const h of handlers.get("session_start") ?? []) {
-			await h({ type: "session_start", reason: "startup" }, ctx);
+			await h(sessionStartEvent("startup"), ctx);
 		}
 		expect(calls.setActiveTools).toHaveLength(0);
 	});
@@ -2082,5 +2127,33 @@ describe("unknown-baseline legacy behavior", () => {
 		await faceCmd!.handler("off", offCtx);
 		expect(calls.setActiveTools[calls.setActiveTools.length - 1]).toEqual([["read"]][0]);
 		expect(notifications.some(([m, t]) => t === "warning" && m.includes("default tools unknown"))).toBe(true);
+	});
+});
+
+describe("setModel false path", () => {
+	it("setModel returning false warns but thinking/tools/prompt/entry still occur", async () => {
+		writeProfile("nokey", {
+			model: "ollama-cloud/glm-5.2:high",
+			thinking: "low",
+			tools: "read",
+			"append-system-prompt": "No key",
+		});
+		const calls2 = makeCalls();
+		const { pi: pi2, handlers: handlers2, command: command2 } = makePi(calls2, new Map<string, boolean | string>());
+		(pi2 as unknown as { setModel: (m: unknown) => Promise<boolean> }).setModel = async () => false;
+		factory(pi2);
+		const faceCmd2 = command2("face");
+		const notifications: [string, "info" | "warning" | "error" | undefined][] = [];
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+			ui: uiStub({ notify: (m, t) => notifications.push([m, t]) }),
+		});
+		await expect(faceCmd2!.handler("nokey", ctx)).resolves.toBeUndefined();
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("no API key"))).toBe(true);
+		expect(calls2.setThinkingLevel).toEqual(["low"]);
+		expect(calls2.setActiveTools).toEqual([["read"]]);
+		expect(calls2.appendEntry).toHaveLength(1);
+		const result = await handlers2.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		expect(result).toEqual({ systemPrompt: "BUILT-IN\n\nNo key" });
 	});
 });

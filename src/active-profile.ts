@@ -5,7 +5,7 @@ import type {
 	SessionEntry,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { isValidProfileName, readProfile } from "./profile.ts";
+import { isValidProfileName } from "./profile.ts";
 
 export const FACE_ENTRY_TYPE = "pi-faces";
 
@@ -134,15 +134,6 @@ export class ActiveProfileResolver {
 		if (!flag) return undefined;
 		const name = typeof flag === "string" ? flag : String(flag);
 		return isValidProfileName(name) ? name : undefined;
-	}
-
-	/** Whether a validated flag profile exists and declares tools. */
-	flagProfileHasTools(): boolean {
-		const name = this.flagProfileName();
-		if (!name) return false;
-		const result = readProfile(name);
-		if (!result.ok) return false;
-		return result.profile.tools !== undefined;
 	}
 }
 

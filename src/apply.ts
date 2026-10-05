@@ -49,6 +49,7 @@ export class ProfileApplier {
 	private profileRejected = false;
 	private replacePrompt: string | undefined;
 	private appendPrompt: string | undefined;
+	private pendingThinkingHint: ThinkingLevel | undefined;
 
 	constructor(
 		private readonly pi: ExtensionAPI,
@@ -75,6 +76,10 @@ export class ProfileApplier {
 		if (state.source === "flag") {
 			const profileName = state.profileName;
 			if (!profileName) return;
+			if (!isValidProfileName(profileName)) {
+				this.warnOnce('Invalid profile name: "' + profileName + '"');
+				return;
+			}
 			await this.applyFlagProfile(profileName, event as { reason?: string }, ctx);
 			return;
 		}
@@ -266,15 +271,15 @@ export class ProfileApplier {
 		}
 		// Stash hint for applyThinking if the profile omits thinking.
 		if (thinkingHint) {
-			(this as { _thinkingHint?: ThinkingLevel })._thinkingHint = thinkingHint as ThinkingLevel;
+			this.pendingThinkingHint = thinkingHint as ThinkingLevel;
 		}
 	}
 
 	private applyThinkingBestEffort(profile: import("./types.ts").Profile, warn: WarningReporter): void {
 		let thinking = profile.thinking;
 		if (!thinking) {
-			thinking = (this as { _thinkingHint?: ThinkingLevel })._thinkingHint;
-			delete (this as { _thinkingHint?: ThinkingLevel })._thinkingHint;
+			thinking = this.pendingThinkingHint;
+			this.pendingThinkingHint = undefined;
 		}
 		if (!thinking) return;
 		try {

@@ -96,13 +96,22 @@ interface PiCalls {
 	setActiveTools: unknown[][];
 	sendMessage: { customType: string; content: string; display: boolean }[];
 	setSessionName: string[];
+	getActiveTools: string[][];
+	appendEntry: { customType: string; data: unknown }[];
+	reload: boolean;
 }
 
 type AnyHandler = (event: any, ctx: ExtensionContext) => unknown;
 
-function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
+interface MakePiOpts {
+	branch?: unknown[];
+	activeTools?: string[];
+}
+
+function makePi(calls: PiCalls, flags: Map<string, boolean | string>, opts: MakePiOpts = {}) {
 	const handlers = new Map<string, AnyHandler[]>();
 	const commands = new Map<string, CapturedCommand>();
+	const entryRenderers = new Map<string, unknown>();
 	const allTools: { name: string; sourceInfo?: { source: string } }[] = [
 		{ name: "read", sourceInfo: { source: "builtin" } },
 		{ name: "bash", sourceInfo: { source: "builtin" } },
@@ -115,6 +124,7 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		{ name: "ext_extra", sourceInfo: { source: "extension" } },
 	];
 	let sessionName: string | undefined;
+	let activeTools: string[] = opts.activeTools ?? [];
 
 	const pi = {
 		getFlag: (n: string) => flags.get(n),
@@ -127,6 +137,9 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		registerCommand: (name: string, o: CapturedCommand) => {
 			commands.set(name, o);
 		},
+		registerEntryRenderer: (customType: string, renderer: unknown) => {
+			entryRenderers.set(customType, renderer);
+		},
 		sendMessage: (m: { customType: string; content: string; display: boolean }) => calls.sendMessage.push(m),
 		setModel: async (model: unknown) => {
 			calls.setModel.push(model);
@@ -134,11 +147,24 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		},
 		setThinkingLevel: (level: unknown) => calls.setThinkingLevel.push(level),
 		setActiveTools: (tools: string[]) => calls.setActiveTools.push(tools),
+		getActiveTools: () => {
+			calls.getActiveTools.push(activeTools);
+			return activeTools;
+		},
+		setActiveToolsState: (tools: string[]) => {
+			activeTools = tools;
+		},
 		getAllTools: () => allTools,
 		getSessionName: () => sessionName,
 		setSessionName: (name: string) => {
 			sessionName = name;
 			calls.setSessionName.push(name);
+		},
+		appendEntry: (customType: string, data?: unknown) => {
+			calls.appendEntry.push({ customType, data });
+		},
+		sessionManager: {
+			getBranch: () => opts.branch ?? [],
 		},
 	} as unknown as ExtensionAPI;
 	return {
@@ -148,6 +174,9 @@ function makePi(calls: PiCalls, flags: Map<string, boolean | string>) {
 		setSessionNameState: (name: string | undefined) => {
 			sessionName = name;
 		},
+		setActiveToolsState: (tools: string[]) => {
+			activeTools = tools;
+		},
 	};
 }
 
@@ -156,6 +185,7 @@ interface UiOpts {
 	confirm?: () => Promise<boolean>;
 	input?: () => Promise<string | undefined>;
 	editor?: () => Promise<string | undefined>;
+	select?: () => Promise<string | undefined>;
 }
 
 function uiStub(opts: UiOpts = {}): ExtensionUIContext {
@@ -164,6 +194,7 @@ function uiStub(opts: UiOpts = {}): ExtensionUIContext {
 		confirm: opts.confirm ?? (async () => false),
 		input: opts.input ?? (async () => undefined),
 		editor: opts.editor ?? (async () => undefined),
+		select: opts.select ?? (async () => undefined),
 	} as unknown as ExtensionUIContext;
 }
 
@@ -171,6 +202,8 @@ interface CtxOpts {
 	ui?: ExtensionUIContext;
 	hasUI?: boolean;
 	modelRegistry?: ExtensionContext["modelRegistry"];
+	branch?: unknown[];
+	reload?: () => Promise<void>;
 }
 
 function makeCtx(opts: CtxOpts = {}): ExtensionCommandContext {
@@ -180,6 +213,8 @@ function makeCtx(opts: CtxOpts = {}): ExtensionCommandContext {
 		mode: "print",
 		cwd: process.cwd(),
 		modelRegistry: opts.modelRegistry,
+		sessionManager: { getBranch: () => opts.branch ?? [] },
+		reload: opts.reload ?? (async () => {}),
 	} as unknown as ExtensionCommandContext;
 }
 
@@ -196,12 +231,13 @@ function event(sp?: string, cliAppend?: string): BeforeAgentStartEvent {
 	} as unknown as BeforeAgentStartEvent;
 }
 function sessionStartEvent() {
-	return { type: "session_start" } as unknown as BeforeAgentStartEvent;
+	return { type: "session_start", reason: "startup" } as unknown as BeforeAgentStartEvent;
 }
 
 async function runApplySessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
-	const h = handlers.get("session_start")?.[0];
-	if (h) await h(sessionStartEvent(), ctx);
+	for (const h of handlers.get("session_start") ?? []) {
+		await h(sessionStartEvent(), ctx);
+	}
 }
 
 async function runSessionStart(handlers: Map<string, AnyHandler[]>, ctx: ExtensionContext): Promise<void> {
@@ -211,7 +247,7 @@ async function runSessionStart(handlers: Map<string, AnyHandler[]>, ctx: Extensi
 }
 
 function makeCalls(): PiCalls {
-	return { setModel: [], setThinkingLevel: [], setActiveTools: [], sendMessage: [], setSessionName: [] };
+	return { setModel: [], setThinkingLevel: [], setActiveTools: [], sendMessage: [], setSessionName: [], getActiveTools: [], appendEntry: [], reload: false };
 }
 
 function setupCommand() {
@@ -1546,6 +1582,7 @@ describe("session_start prefix hook", () => {
 describe("session_info_changed prefix hook", () => {
 	it("prefixes a plain name set via /name or RPC", async () => {
 		const { calls, handlers } = setupPrefix("planner");
+		await runSessionStart(handlers, makeCtx());
 		await handlers.get("session_info_changed")![0](
 			{ type: "session_info_changed", name: "Fix bug" },
 			makeCtx()
@@ -1555,6 +1592,7 @@ describe("session_info_changed prefix hook", () => {
 
 	it("does not re-prefix (no loop) when the name already carries the tag", async () => {
 		const { calls, handlers } = setupPrefix("planner");
+		await runSessionStart(handlers, makeCtx());
 		await handlers.get("session_info_changed")![0](
 			{ type: "session_info_changed", name: "Fix bug" },
 			makeCtx()
@@ -1596,6 +1634,7 @@ describe("session_info_changed prefix hook", () => {
 
 	it("stays enabled when config file is absent", async () => {
 		const { calls, handlers } = setupPrefix("planner");
+		await runSessionStart(handlers, makeCtx());
 		await handlers.get("session_info_changed")![0](
 			{ type: "session_info_changed", name: "Fix bug" },
 			makeCtx()
@@ -1606,6 +1645,7 @@ describe("session_info_changed prefix hook", () => {
 	it("stays enabled when config explicitly sets prefix_session_name=true", async () => {
 		writeConfig({ prefix_session_name: true });
 		const { calls, handlers } = setupPrefix("planner");
+		await runSessionStart(handlers, makeCtx());
 		await handlers.get("session_info_changed")![0](
 			{ type: "session_info_changed", name: "Fix bug" },
 			makeCtx()
@@ -1655,5 +1695,392 @@ describe("tightenStorageModes", () => {
 		expect((lstatSync(join(override, "p.json")).mode & 0o777).toString(8)).toBe("644");
 		expect((lstatSync(join(override, "config", "config.json")).mode & 0o777).toString(8)).toBe("644");
 		rmSync(override, { recursive: true, force: true });
+	});
+});
+
+// --- mid-session /face swap -------------------------------------------------
+
+function setupFaceCommand(opts: { flags?: Map<string, boolean | string>; branch?: unknown[]; activeTools?: string[] } = {}) {
+	const calls = makeCalls();
+	const flags = opts.flags ?? new Map<string, boolean | string>();
+	const { pi, handlers, command, setActiveToolsState, setSessionNameState } = makePi(calls, flags, {
+		branch: opts.branch,
+		activeTools: opts.activeTools,
+	});
+	factory(pi);
+	return { calls, handlers, command, setActiveToolsState, setSessionNameState };
+}
+
+describe("/face command", () => {
+	it("/face brain applies model/thinking/tools and cached prompt", async () => {
+		writeProfile("brain", {
+			model: "ollama-cloud/glm-5.2:high",
+			tools: "read, bash",
+			"append-system-prompt": "You are brain.",
+		});
+
+		const { calls, handlers, command } = setupFaceCommand();
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		const faceCmd = command("face");
+		expect(faceCmd).toBeDefined();
+		await faceCmd!.handler("brain", ctx);
+
+		expect(calls.setModel).toHaveLength(1);
+		expect(calls.setThinkingLevel).toEqual(["high"]);
+		expect(calls.setActiveTools).toEqual([["read", "bash"]]);
+		expect(calls.appendEntry).toHaveLength(1);
+		expect(calls.appendEntry[0].customType).toBe("pi-faces");
+
+		const result = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		expect(result).toEqual({ systemPrompt: "BUILT-IN\n\nYou are brain." });
+	});
+
+	it("skills become discoverable after reload following /face brain", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-face-skill-"));
+		writeProfile("brain", {
+			model: "ollama-cloud/glm-5.2",
+			skill: [skillDir],
+		});
+		const { calls, handlers, command } = setupFaceCommand();
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		const faceCmd = command("face");
+		await faceCmd!.handler("brain", ctx);
+
+		const branch = calls.appendEntry.map((e) => ({
+			type: "custom",
+			customType: e.customType,
+			data: e.data,
+		}));
+		const reloadCtx = makeCtx({ branch });
+		for (const h of handlers.get("session_start") ?? []) {
+			await h({ type: "session_start", reason: "reload" }, reloadCtx);
+		}
+		const res = handlers.get("resources_discover")![0]({ cwd: process.cwd(), reason: "reload" }, reloadCtx) as { skillPaths?: string[] } | undefined;
+		expect(res?.skillPaths).toEqual([skillDir]);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+
+	it("A->B applies all concerns and reloads once when skill sets differ", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-face-skill-"));
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", skill: ["/nope-a"] });
+		writeProfile("b", { model: "ollama-cloud/kimi-k2.7-code", skill: [skillDir] });
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		let reloadCount = 0;
+		const ctxA = makeCtx({
+			modelRegistry: ctx.modelRegistry,
+			reload: async () => { reloadCount++; },
+		});
+		await faceCmd!.handler("a", ctxA);
+		const afterA = reloadCount;
+
+		const ctxB = makeCtx({
+			modelRegistry: ctx.modelRegistry,
+			reload: async () => { reloadCount++; },
+		});
+		await faceCmd!.handler("b", ctxB);
+		expect(reloadCount - afterA).toBe(1);
+		expect(calls.setModel).toHaveLength(2);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+
+	it("same-profile re-swap appends entry but does not reload when skill sets equal", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", skill: ["/nope-a"] });
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		await faceCmd!.handler("a", ctx);
+		expect(calls.appendEntry).toHaveLength(1);
+
+		let reloaded = false;
+		const ctx2 = makeCtx({
+			modelRegistry: ctx.modelRegistry,
+			reload: async () => { reloaded = true; },
+		});
+		await faceCmd!.handler("a", ctx2);
+		expect(calls.appendEntry).toHaveLength(2);
+		expect(reloaded).toBe(false);
+	});
+
+	it("no-arg prints list in non-UI mode and never calls select", async () => {
+		writeProfile("alpha", { description: "a" });
+		writeProfile("beta", {});
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		let selected = false;
+		const ctx = makeCtx({
+			ui: uiStub({
+				select: async () => { selected = true; return undefined; },
+			}),
+		});
+		await faceCmd!.handler("", ctx);
+		expect(selected).toBe(false);
+		expect(calls.sendMessage).toHaveLength(1);
+		expect(calls.sendMessage[0].content).toContain("alpha");
+		expect(calls.sendMessage[0].content).toContain("beta");
+	});
+
+	it("no-arg with UI calls select and routes selection", async () => {
+		writeProfile("alpha", {});
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			hasUI: true,
+			ui: uiStub({ select: async () => "alpha" }),
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+		await faceCmd!.handler("", ctx);
+		expect(calls.appendEntry).toHaveLength(1);
+		expect(calls.appendEntry[0].data).toMatchObject({ kind: "face", profile: "alpha" });
+	});
+
+	it("no-arg with UI cancel creates no entry", async () => {
+		writeProfile("alpha", {});
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			hasUI: true,
+			ui: uiStub({ select: async () => undefined }),
+		});
+		await faceCmd!.handler("", ctx);
+		expect(calls.appendEntry).toHaveLength(0);
+	});
+
+	it("/face off clears prompt and restores baseline tools", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", tools: "read", "append-system-prompt": "A" });
+		const { calls, handlers, command, setActiveToolsState } = setupFaceCommand({ activeTools: ["bash", "grep"] });
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		await runSessionStart(handlers, makeCtx());
+		await faceCmd!.handler("a", ctx);
+		setActiveToolsState(["read"]);
+		let reloaded = false;
+		const offCtx = makeCtx({
+			modelRegistry: ctx.modelRegistry,
+			reload: async () => { reloaded = true; },
+		});
+		await faceCmd!.handler("off", offCtx);
+
+		expect(calls.setActiveTools[calls.setActiveTools.length - 1]).toEqual(["bash", "grep"]);
+		expect(calls.appendEntry[calls.appendEntry.length - 1].data).toMatchObject({ kind: "face", profile: null });
+		const result = await handlers.get("before_agent_start")![0](event("BUILT-IN"), ctx);
+		expect(result).toBeUndefined();
+		expect(reloaded).toBe(false);
+	});
+
+	it("invalid profile name warns and creates no entry", async () => {
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const notifications: [string, "info" | "warning" | "error" | undefined][] = [];
+		const ctx = makeCtx({
+			ui: uiStub({ notify: (m, t) => notifications.push([m, t]) }),
+		});
+		await faceCmd!.handler("../x", ctx);
+		expect(calls.appendEntry).toHaveLength(0);
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("Usage"))).toBe(true);
+	});
+
+	it("missing profile warns and creates no entry", async () => {
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const notifications: [string, "info" | "warning" | "error" | undefined][] = [];
+		const ctx = makeCtx({
+			ui: uiStub({ notify: (m, t) => notifications.push([m, t]) }),
+		});
+		await faceCmd!.handler("missing", ctx);
+		expect(calls.appendEntry).toHaveLength(0);
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("No profile"))).toBe(true);
+	});
+
+	it("model setModel failure warns but other concerns still run", async () => {
+		writeProfile("trouble", {
+			model: "ollama-cloud/glm-5.2",
+			thinking: "high",
+			tools: "read",
+			"append-system-prompt": "Trouble",
+		});
+		const calls2 = makeCalls();
+		const { pi: pi2, handlers: handlers2, command: command2 } = makePi(calls2, new Map<string, boolean | string>());
+		(pi2 as unknown as { setModel: (m: unknown) => Promise<boolean> }).setModel = async () => {
+			throw new Error("no key");
+		};
+		factory(pi2);
+		const faceCmd2 = command2("face");
+		const notifications: [string, "info" | "warning" | "error" | undefined][] = [];
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+			ui: uiStub({ notify: (m, t) => notifications.push([m, t]) }),
+		});
+		await expect(faceCmd2!.handler("trouble", ctx)).resolves.toBeUndefined();
+		expect(calls2.setThinkingLevel).toEqual(["high"]);
+		expect(calls2.setActiveTools).toEqual([["read"]]);
+		expect(calls2.appendEntry).toHaveLength(1);
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("failed to set model"))).toBe(true);
+	});
+});
+
+describe("active profile resolver", () => {
+	it("last face entry wins on current branch", async () => {
+		const { calls, handlers, command } = setupFaceCommand({
+			branch: [
+				{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "a", defaultTools: null } },
+				{ type: "custom", customType: "pi-faces", data: { version: 1, kind: "face", profile: "b", defaultTools: null } },
+			],
+		});
+		const ctx = makeCtx();
+		for (const h of handlers.get("session_start") ?? []) {
+			await h({ type: "session_start", reason: "resume" }, ctx);
+		}
+		// No setSessionName should happen on resume with no active flag/override profile name set,
+		// because source is override with profile b and no session name was provided.
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+
+	it("null off sentinel survives reload and restores baseline", async () => {
+		const skillDir = mkdtempSync(join(tmpdir(), "piap-face-skill-"));
+		writeProfile("coder", { model: "ollama-cloud/kimi-k2.7-code", tools: "read, bash", skill: [skillDir] });
+		const { calls, handlers, command } = setupFaceCommand({
+			flags: new Map<string, boolean | string>([["profile", "coder"]]),
+			activeTools: ["bash", "grep"],
+		});
+		const ctx = makeCtx();
+		for (const h of handlers.get("session_start") ?? []) {
+			await h({ type: "session_start", reason: "startup" }, ctx);
+		}
+		expect(calls.appendEntry).toHaveLength(1);
+		expect(calls.appendEntry[0].data).toMatchObject({ kind: "baseline", defaultTools: ["bash", "grep"] });
+
+		const faceCmd = command("face");
+		let reloaded = false;
+		const offCtx = makeCtx({
+			reload: async () => { reloaded = true; },
+		});
+		await faceCmd!.handler("off", offCtx);
+		expect(reloaded).toBe(true);
+
+		const reloadBranch = calls.appendEntry.map((e) => ({
+			type: "custom",
+			customType: e.customType,
+			data: e.data,
+		}));
+		const reloadCtx = makeCtx({ branch: reloadBranch });
+		const callsAfter = makeCalls();
+		const { pi: pi2, handlers: handlers2 } = makePi(callsAfter, new Map<string, boolean | string>([["profile", "coder"]]));
+		factory(pi2);
+		for (const h of handlers2.get("session_start") ?? []) {
+			await h({ type: "session_start", reason: "reload" }, reloadCtx);
+		}
+		expect(callsAfter.setActiveTools).toEqual([["bash", "grep"]]);
+		expect(callsAfter.setModel).toHaveLength(0);
+		rmSync(skillDir, { recursive: true, force: true });
+	});
+});
+
+describe("tools-default rule", () => {
+	it("direct profile without tools restores persisted baseline after restrictive face", async () => {
+		writeProfile("restricted", { model: "ollama-cloud/glm-5.2", tools: "read" });
+		writeProfile("default", { model: "ollama-cloud/glm-5.2" });
+		const { calls, handlers, command, setActiveToolsState } = setupFaceCommand({ activeTools: ["bash", "grep", "ls"] });
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		await runSessionStart(handlers, makeCtx());
+		await faceCmd!.handler("restricted", ctx);
+		expect(calls.setActiveTools).toEqual([["read"]]);
+		setActiveToolsState(["read"]);
+
+		await faceCmd!.handler("default", ctx);
+		expect(calls.setActiveTools[calls.setActiveTools.length - 1]).toEqual(["bash", "grep", "ls"]);
+	});
+
+	it("startup flag profile with omitted tools leaves default tools untouched", async () => {
+		writeProfile("no-tools", { model: "ollama-cloud/glm-5.2" });
+		const calls = makeCalls();
+		const { pi, handlers } = makePi(calls, new Map<string, boolean | string>([["profile", "no-tools"]]), { activeTools: ["bash", "grep"] });
+		factory(pi);
+		const ctx = makeCtx();
+		for (const h of handlers.get("session_start") ?? []) {
+			await h({ type: "session_start", reason: "startup" }, ctx);
+		}
+		expect(calls.setActiveTools).toHaveLength(0);
+	});
+});
+
+describe("session-name transition", () => {
+	it("[A] Name becomes [B] Name then Name on off when prefix enabled", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2" });
+		writeProfile("b", { model: "ollama-cloud/kimi-k2.7-code" });
+		const { calls, handlers, command, setSessionNameState } = setupFaceCommand();
+		setSessionNameState("Task");
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+
+		await faceCmd!.handler("a", ctx);
+		expect(calls.setSessionName[calls.setSessionName.length - 1]).toBe("[a] Task");
+
+		setSessionNameState("[a] Task");
+		await faceCmd!.handler("b", ctx);
+		expect(calls.setSessionName[calls.setSessionName.length - 1]).toBe("[b] Task");
+
+		setSessionNameState("[b] Task");
+		await faceCmd!.handler("off", ctx);
+		expect(calls.setSessionName[calls.setSessionName.length - 1]).toBe("Task");
+	});
+
+	it("prefix transition is a no-op when prefix config disabled", async () => {
+		writeConfig({ prefix_session_name: false });
+		writeProfile("a", { model: "ollama-cloud/glm-5.2" });
+		writeProfile("b", { model: "ollama-cloud/kimi-k2.7-code" });
+		const { calls, handlers, command, setSessionNameState } = setupFaceCommand();
+		setSessionNameState("[a] Task");
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+		await faceCmd!.handler("a", ctx);
+		await faceCmd!.handler("b", ctx);
+		expect(calls.setSessionName).toHaveLength(0);
+	});
+});
+
+describe("unknown-baseline legacy behavior", () => {
+	it("/face off without baseline warns and keeps current tools", async () => {
+		writeProfile("a", { model: "ollama-cloud/glm-5.2", tools: "read" });
+		const { calls, handlers, command } = setupFaceCommand();
+		const faceCmd = command("face");
+		const ctx = makeCtx({
+			modelRegistry: { find: (p: string, m: string) => ({ id: m, provider: p }) } as unknown as ExtensionContext["modelRegistry"],
+		});
+		const notifications: [string, "info" | "warning" | "error" | undefined][] = [];
+		const offCtx = makeCtx({
+			modelRegistry: ctx.modelRegistry,
+			ui: uiStub({ notify: (m, t) => notifications.push([m, t]) }),
+		});
+
+		await faceCmd!.handler("a", ctx);
+		// No startup baseline was captured, so off has unknown defaults.
+		await faceCmd!.handler("off", offCtx);
+		expect(calls.setActiveTools[calls.setActiveTools.length - 1]).toEqual([["read"]][0]);
+		expect(notifications.some(([m, t]) => t === "warning" && m.includes("default tools unknown"))).toBe(true);
 	});
 });

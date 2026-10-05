@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readConfigFile } from "./config.ts";
-import { isValidProfileName } from "./profile.ts";
-import { withProfilePrefix } from "./prefix.ts";
+import type { ActiveProfileResolver } from "./active-profile.ts";
+import { replaceProfilePrefix } from "./prefix.ts";
 
 /**
  * Prefixes the session display name with `[<profile-name>]` while a profile is
@@ -11,7 +11,7 @@ import { withProfilePrefix } from "./prefix.ts";
  *     session_start reads it back via getSessionName()
  *   - /name slash command and RPC setSessionName(): fires session_info_changed
  *   - this extension's own setSessionName(): re-fires session_info_changed;
- *     withProfilePrefix() short-circuits to prevent a re-entrant loop
+ *     replaceProfilePrefix() short-circuits to prevent a re-entrant loop
  *
  * The prefix is enabled by default; disable it via the package config file
  * (`{ "prefix_session_name": false }`).
@@ -19,30 +19,45 @@ import { withProfilePrefix } from "./prefix.ts";
 export class SessionNamePrefix {
 	private configIssueWarned = false;
 
-	constructor(private readonly pi: ExtensionAPI) {}
+	constructor(
+		private readonly pi: ExtensionAPI,
+		private readonly resolver: ActiveProfileResolver,
+	) {}
 
 	/** Wire session_start and session_info_changed handlers. */
 	register(): void {
 		// session_start covers startup --name, /new, /resume, /fork, and reload.
 		// On resume/fork the loaded name may already carry the prefix from a
-		// prior run; withProfilePrefix skips it. On /new there is no name yet;
+		// prior run; replaceProfilePrefix skips it. On /new there is no name yet;
 		// the later session_info_changed from /name applies the prefix.
 		this.pi.on("session_start", async () => {
 			this.applyPrefixTo(this.pi.getSessionName());
 		});
 
 		// session_info_changed covers /name, RPC setSessionName(), and our own
-		// re-entrant setSessionName() (which withProfilePrefix short-circuits).
+		// re-entrant setSessionName() (which replaceProfilePrefix short-circuits).
 		this.pi.on("session_info_changed", async (event) => {
 			this.applyPrefixTo(event.name);
 		});
 	}
 
+	/**
+	 * Command-driven transition: `[old] Name` → `[new] Name`, or strip the tag on
+	 * off. Gated by the same config check as automatic prefixing.
+	 */
+	transition(oldProfileName: string | undefined, newProfileName: string | undefined): void {
+		if (!this.prefixEnabled()) return;
+		const name = this.pi.getSessionName();
+		if (!name) return;
+		const updated = replaceProfilePrefix(name, oldProfileName, newProfileName);
+		if (updated) this.pi.setSessionName(updated);
+	}
+
 	private applyPrefixTo(name: string | undefined): void {
 		if (!this.prefixEnabled()) return;
-		const profileName = this.activeProfileName();
+		const profileName = this.resolver.activeProfileName();
 		if (!profileName) return;
-		const prefixed = withProfilePrefix(name, profileName);
+		const prefixed = replaceProfilePrefix(name as string, undefined, profileName as string);
 		if (prefixed) this.pi.setSessionName(prefixed);
 	}
 
@@ -63,12 +78,5 @@ export class SessionNamePrefix {
 		}
 		const v = result.config.prefix_session_name;
 		return v === undefined ? true : v;
-	}
-
-	private activeProfileName(): string | undefined {
-		const flag = this.pi.getFlag("profile");
-		if (!flag) return undefined;
-		const name = typeof flag === "string" ? flag : String(flag);
-		return isValidProfileName(name) ? name : undefined;
 	}
 }

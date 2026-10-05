@@ -1997,6 +1997,20 @@ describe("active profile resolver", () => {
 		expect(calls.setActiveTools).toEqual([["read"]]);
 	});
 
+	it("startup invalid --profile flag warns", async () => {
+		const calls = makeCalls();
+		const flags = new Map<string, boolean | string>([["profile", "../bad name"]]);
+		const { pi, handlers } = makePi(calls, flags);
+		factory(pi);
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const ctx = makeCtx();
+		for (const h of handlers.get("session_start") ?? []) {
+			await h(sessionStartEvent("startup"), ctx);
+		}
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Invalid profile name: "../bad name"'));
+		warnSpy.mockRestore();
+	});
+
 	it("null off sentinel survives reload and restores baseline", async () => {
 		const skillDir = mkdtempSync(join(tmpdir(), "piap-face-skill-"));
 		writeProfile("coder", { model: "ollama-cloud/kimi-k2.7-code", tools: "read, bash", skill: [skillDir] });

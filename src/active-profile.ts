@@ -37,6 +37,14 @@ export class ActiveProfileResolver {
 		this.current = { source: "none", profileName: undefined, defaultTools: null };
 	}
 
+	private warnOnce(message: string): void {
+		if (!this.profileIssueWarned) {
+			console.warn("[pi-faces] " + message);
+			this.profileIssueWarned = true;
+		}
+	}
+
+	private profileIssueWarned = false;
 	/**
 	 * First session_start handler: restore persisted state, capture startup
 	 * baseline before the applier runs, and persist a baseline entry so later
@@ -133,7 +141,11 @@ export class ActiveProfileResolver {
 		const flag = this.pi.getFlag("profile");
 		if (!flag) return undefined;
 		const name = typeof flag === "string" ? flag : String(flag);
-		return isValidProfileName(name) ? name : undefined;
+		if (!isValidProfileName(name)) {
+			this.warnOnce('Invalid profile name: "' + name + '"');
+			return undefined;
+		}
+		return name;
 	}
 }
 

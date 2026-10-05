@@ -76,10 +76,6 @@ export class ProfileApplier {
 		if (state.source === "flag") {
 			const profileName = state.profileName;
 			if (!profileName) return;
-			if (!isValidProfileName(profileName)) {
-				this.warnOnce('Invalid profile name: "' + profileName + '"');
-				return;
-			}
 			await this.applyFlagProfile(profileName, event as { reason?: string }, ctx);
 			return;
 		}

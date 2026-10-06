@@ -17,3 +17,37 @@ export function withProfilePrefix(
 	if (hasProfilePrefix(name, profileName)) return undefined;
 	return "[" + profileName + "] " + name;
 }
+
+/**
+ * Replace or remove an exact existing `[oldProfileName]` tag. If the name does
+ * not carry the old tag and a new profile is given, fall back to ordinary
+ * prefixing. Returns undefined when there is no change to make.
+ */
+export function replaceProfilePrefix(
+	name: string,
+	oldProfileName: string | undefined,
+	newProfileName: string | undefined
+): string | undefined {
+	if (!name) return undefined;
+	const oldTag = oldProfileName ? "[" + oldProfileName + "]" : undefined;
+	const newTag = newProfileName ? "[" + newProfileName + "]" : undefined;
+
+	if (oldTag) {
+		if (name === oldTag) {
+			return newTag;
+		}
+		if (name.startsWith(oldTag + " ")) {
+			const rest = name.slice(oldTag.length + 1);
+			if (newTag) {
+				return newTag + " " + rest;
+			}
+			return rest || undefined;
+		}
+	}
+
+	if (newProfileName) {
+		return withProfilePrefix(name, newProfileName);
+	}
+
+	return undefined;
+}

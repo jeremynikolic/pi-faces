@@ -7,8 +7,12 @@ import {
 	defaultScaffold,
 	isValidProfileName,
 	listProfiles,
+	readProfile,
 	readProfileRaw,
 } from "./profile.ts";
+import type { ActiveProfileResolver } from "./active-profile.ts";
+import type { ProfileApplier, WarningReporter } from "./apply.ts";
+import type { SessionNamePrefix } from "./session-prefix.ts";
 
 const SUBCOMMANDS = ["list", "show", "new", "edit", "delete", "rename"];
 
@@ -327,4 +331,138 @@ export function registerProfilesCommand(pi: ExtensionAPI): void {
 		}
 		ctx.ui.notify("[pi-faces] Renamed " + from + " → " + to, "info");
 	}
+}
+
+// --- /face command ----------------------------------------------------------
+
+/** Register the `/face` swap command and its handlers. */
+export function registerFaceCommand(
+	pi: ExtensionAPI,
+	resolver: ActiveProfileResolver,
+	applier: ProfileApplier,
+	prefix: SessionNamePrefix
+): void {
+	pi.registerCommand("face", {
+		description: "Switch active face/profile mid-session: /face <name> or /face off",
+		getArgumentCompletions(argPrefix) {
+			const names = listProfiles().map((p) => p.name);
+			const options = ["off", ...names];
+			return options
+				.filter((o) => o.startsWith(argPrefix.trim()))
+				.map((o) => ({ value: o, label: o, description: undefined }));
+		},
+		async handler(args, ctx) {
+			const parts = args.trim().split(/\s+/).filter(Boolean);
+
+			if (parts.length === 0) {
+				return showPicker(ctx);
+			}
+			if (parts.length > 1) {
+				notifyWarning(ctx, "Usage: /face <name> or /face off");
+				return;
+			}
+
+			const name = parts[0];
+			if (name === "off") {
+				return faceOff(ctx);
+			}
+			return faceSwap(name, ctx);
+		},
+	});
+
+	async function showPicker(ctx: ExtensionCommandContext) {
+		const profiles = listProfiles();
+		if (!ctx.hasUI) {
+			if (profiles.length === 0) {
+				pi.sendMessage({ customType: "pi-faces", content: "No faces found.", display: true });
+				return;
+			}
+			const lines = profiles.map((p) => "• " + p.name + (p.description ? " — " + p.description : ""));
+			pi.sendMessage({
+				customType: "pi-faces",
+				content: "Available faces:\n\n" + lines.join("\n"),
+				display: true,
+			});
+			return;
+		}
+
+		const names = profiles.map((p) => p.name);
+		const selected = await ctx.ui.select("Select face", ["off", ...names]);
+		if (selected === undefined) return;
+		if (selected === "off") return faceOff(ctx);
+		return faceSwap(selected, ctx);
+	}
+
+	async function faceSwap(name: string, ctx: ExtensionCommandContext) {
+		if (!isValidProfileName(name)) {
+			notifyWarning(ctx, 'Invalid profile name: "' + name + '"');
+			return;
+		}
+		const result = readProfile(name);
+		if (!result.ok) {
+			notifyWarning(ctx, "No profile: " + name);
+			return;
+		}
+
+		const oldName = resolver.activeProfileName();
+		resolver.setOverride(name);
+		await applier.applyProfileBestEffort(name, ctx, makeReporter(ctx));
+
+		try {
+			resolver.appendFaceEntry(name, resolver.getDefaultTools());
+		} catch (err) {
+			notifyWarning(ctx, "Failed to persist face state: " + err);
+			return;
+		}
+		prefix.transition(oldName, name);
+
+		const oldSkills = skillSet(oldName);
+		const newSkills = skillSet(name);
+		if (!setsEqual(oldSkills, newSkills)) {
+			await ctx.reload();
+		}
+	}
+
+	async function faceOff(ctx: ExtensionCommandContext) {
+		const oldName = resolver.activeProfileName();
+		resolver.setOverride(null);
+		applier.clearFaceProfile(ctx, makeReporter(ctx));
+		try {
+			resolver.appendFaceEntry(null, resolver.getDefaultTools());
+		} catch (err) {
+			notifyWarning(ctx, "Failed to persist face state: " + err);
+			return;
+		}
+		prefix.transition(oldName, undefined);
+
+		const oldSkills = skillSet(oldName);
+		if (oldSkills.size > 0) {
+			await ctx.reload();
+		}
+	}
+}
+
+function notifyWarning(ctx: ExtensionCommandContext, message: string): void {
+	ctx.ui.notify("[pi-faces] " + message, "warning");
+}
+
+function makeReporter(ctx: ExtensionCommandContext): WarningReporter {
+	return (message) => {
+		ctx.ui.notify("[pi-faces] " + message, "warning");
+	};
+}
+
+function skillSet(profileName: string | undefined): Set<string> {
+	if (!profileName) return new Set();
+	const result = readProfile(profileName);
+	if (!result.ok) return new Set();
+	return new Set(result.profile.skill ?? []);
+}
+
+function setsEqual(a: Set<string>, b: Set<string>): boolean {
+	if (a.size !== b.size) return false;
+	for (const x of a) {
+		if (!b.has(x)) return false;
+	}
+	return true;
 }

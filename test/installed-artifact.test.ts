@@ -72,6 +72,7 @@ function makePi(allTools: string[]): { pi: ExtensionAPI; calls: PiCalls; handler
 			handlers.set(ev, list);
 		},
 		registerCommand: () => {},
+		registerEntryRenderer: () => {},
 		getSessionName: () => undefined,
 		setSessionName: () => {},
 		setModel: async (model: unknown) => {
@@ -80,7 +81,10 @@ function makePi(allTools: string[]): { pi: ExtensionAPI; calls: PiCalls; handler
 		},
 		setThinkingLevel: (level: unknown) => calls.setThinkingLevel.push(level),
 		setActiveTools: (t: string[]) => calls.setActiveTools.push(t),
+		getActiveTools: () => [],
 		getAllTools: () => tools,
+		appendEntry: () => {},
+		sessionManager: { getBranch: () => [] },
 	} as unknown as ExtensionAPI;
 
 	return { pi, calls, handlers };
@@ -153,7 +157,10 @@ describe.skipIf(!haveEnv)("installed artifact harness", () => {
 					return undefined;
 				},
 			};
-			const ctx = { modelRegistry } as unknown as ExtensionContext;
+			const ctx = {
+			modelRegistry,
+			sessionManager: { getBranch: () => [] },
+		} as unknown as ExtensionContext;
 
 			for (const h of handlers.get("session_start") ?? []) {
 				await h({ type: "session_start" }, ctx);
